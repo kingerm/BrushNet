@@ -1,12 +1,14 @@
 #!/usr/bin/env python
 # coding=utf-8
 
+import os
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'  # 本地改镜像站才能调试
+os.environ['CUDA_VISIBLE_DEVICES'] = '3'
 import argparse
 import contextlib
 import gc
 import logging
 import math
-import os
 import random
 import shutil
 from pathlib import Path
@@ -78,7 +80,7 @@ def log_validation(
     else:
         brushnet = BrushNetModel.from_pretrained(args.output_dir, torch_dtype=weight_dtype)
 
-    pipeline = StableDiffusionBrushNetPipeline.from_pretrained(
+    pipeline = StableDiffusionBrushNetPipeline.from_pretrained(  # 从这里会进入相应的pipeline。应该是训练的时候只需要知道它的输出再反向传播，不需要进去看。eval的时候需要给它赋值
         args.pretrained_model_name_or_path,
         vae=vae,
         text_encoder=text_encoder,
@@ -181,7 +183,7 @@ def import_model_class_from_model_name_or_path(pretrained_model_name_or_path: st
         pretrained_model_name_or_path,
         subfolder="text_encoder",
         revision=revision,
-    )
+    )  # text_encoder_config记录了CLIPTextEncoder的参数
     model_class = text_encoder_config.architectures[0]
 
     if model_class == "CLIPTextModel":
@@ -514,10 +516,10 @@ def parse_args(input_args=None):
             " to be used with all prompts, or a single prompt that will be used with all `--validation_image`s."
         ),
     )
-    parser.add_argument(
+    parser.add_argument(   # 这里修改validation_image!
         "--validation_image",
         type=str,
-        default=["examples/brushnet/src/test_image.jpg"],
+        default=["src/test_image.jpg"],  # 删除examples/brushnet/前缀
         nargs="+",
         help=(
             "A set of paths to the paintingnet conditioning image be evaluated every `--validation_steps`"
@@ -529,7 +531,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--validation_mask",
         type=str,
-        default=["examples/brushnet/src/test_mask.jpg"],
+        default=["src/test_mask.jpg"],
         nargs="+",
         help=(
             "A set of paths to the paintingnet conditioning image be evaluated every `--validation_steps`"
@@ -708,19 +710,19 @@ class MyWebDataset():
         )
         return inputs.input_ids
 
-    def __call__(self,examples):
-        pixel_values=[]
+    def __call__(self,examples):  # 这里开启训练的内容！
+        pixel_values=[]  # examples就是训练数据
         conditioning_pixel_values=[]
         masks=[]
         input_ids=[]
         
         for example in examples:
             caption=example["caption"].decode('utf-8')
-            height=int(example["height"].decode('utf-8'))
-            width=int(example["width"].decode('utf-8'))
+            height=int(example["height"].decode('utf-8'))  # 这可以不是512-512.
+            width=int(example["width"].decode('utf-8'))  # 调试看到某个实例是h=605,width=915
             image = cv2.imdecode(np.asarray(bytearray(example["image"]), dtype="uint8"), cv2.IMREAD_COLOR)
             segmentation = json.loads(example["segmentation"])
-
+            # image是ndarray: (605, 915, 3),segmentation: 7个bbox，7个instances
             if len(segmentation["mask"])>0:
                 mask=self.rle2mask(random.choice(segmentation["mask"]),(height,width))[:,:,np.newaxis]
             else:
@@ -730,7 +732,7 @@ class MyWebDataset():
                 mask = self.random_mask_gen(image.shape[0],image.shape[1])[0][:,:,np.newaxis]
 
             
-            if random.random()<0.3:
+            if random.random()<0.3:  # 这就是个随机函数，随机生成0-1的小数
                 kernel = np.ones((8,8),np.uint8)  
                 mask_erosion = cv2.erode(mask,kernel,iterations = 1)
                 mask_dilation = cv2.dilate(mask_erosion,kernel,iterations = 1)
@@ -749,25 +751,25 @@ class MyWebDataset():
             else:
                 scale=self.resolution/w
             w_new=int(np.ceil(w*scale))
-            h_new=int(np.ceil(h*scale))
+            h_new=int(np.ceil(h*scale))  # 这一段的意思是等比例缩放，直到image的短边变为512
             
             image=cv2.resize(image,(h_new,w_new),interpolation=cv2.INTER_CUBIC)
             masked_image=cv2.resize(masked_image,(h_new,w_new),interpolation=cv2.INTER_CUBIC)
             mask=cv2.resize(mask,(h_new,w_new),interpolation=cv2.INTER_CUBIC)[:,:,np.newaxis]
-
+            # image, masked_image, mask都会resize为上述的模样
             random_crop=[random.randint(0,w_new-self.resolution),random.randint(0,h_new-self.resolution)]
 
             image=image[random_crop[0]:random_crop[0]+self.resolution,random_crop[1]:random_crop[1]+self.resolution,:]
             masked_image=masked_image[random_crop[0]:random_crop[0]+self.resolution,random_crop[1]:random_crop[1]+self.resolution,:]
             mask=mask[random_crop[0]:random_crop[0]+self.resolution,random_crop[1]:random_crop[1]+self.resolution,:]
-            
+            # 这里会对image, masked_image, mask进行随机裁剪，使得h=w=512
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             masked_image = cv2.cvtColor(masked_image, cv2.COLOR_BGR2RGB)
             image = (image.astype(np.float32) / 127.5) - 1.0
             masked_image = (masked_image.astype(np.float32) / 127.5) - 1.0
 
             mask=mask.astype(np.float32)
-
+            # pixel_values是原图，conditioning_pixel_values是masked_image，mask是mask
             pixel_values.append(torch.tensor(image).permute(2,0,1))
             conditioning_pixel_values.append(torch.tensor(masked_image).permute(2,0,1))
             masks.append(torch.tensor(mask).permute(2,0,1))
@@ -779,7 +781,7 @@ class MyWebDataset():
         conditioning_pixel_values = conditioning_pixel_values.to(memory_format=torch.contiguous_format).float()
         masks = torch.stack(masks)
         masks = masks.to(memory_format=torch.contiguous_format).float()
-        input_ids = torch.stack(input_ids)
+        input_ids = torch.stack(input_ids)  # input_ids就是caption被cliptextencoder编码后对应的token id
 
         return {
             "pixel_values": pixel_values,
@@ -788,144 +790,10 @@ class MyWebDataset():
             "input_ids": input_ids,
         }
 
+# 这里本来有一大段make_train_datasets的代码，但作者把它注释掉了，所以干脆删除
 
-# def make_train_dataset(args, tokenizer, accelerator):
-#     # Get the datasets: you can either provide your own training and evaluation files (see below)
-#     # or specify a Dataset from the hub (the dataset will be downloaded automatically from the datasets Hub).
-
-#     # In distributed training, the load_dataset function guarantees that only one local process can concurrently
-#     # download the dataset.
-#     if args.dataset_name is not None:
-#         # Downloading and loading a dataset from the hub.
-#         dataset = load_dataset(
-#             args.dataset_name,
-#             args.dataset_config_name,
-#             cache_dir=args.cache_dir,
-#         )
-#     else:
-#         if args.train_data_dir is not None:
-#             dataset = load_dataset(
-#                 args.train_data_dir,
-#                 cache_dir=args.cache_dir,
-#             )
-#         # See more about loading custom images at
-#         # https://huggingface.co/docs/datasets/v2.0.0/en/dataset_script
-
-#     # Preprocessing the datasets.
-#     # We need to tokenize inputs and targets.
-#     column_names = dataset["train"].column_names
-
-#     # 6. Get the column names for input/target.
-#     if args.image_column is None:
-#         image_column = column_names[0]
-#         logger.info(f"image column defaulting to {image_column}")
-#     else:
-#         image_column = args.image_column
-#         if image_column not in column_names:
-#             raise ValueError(
-#                 f"`--image_column` value '{args.image_column}' not found in dataset columns. Dataset columns are: {', '.join(column_names)}"
-#             )
-
-#     if args.caption_column is None:
-#         caption_column = column_names[1]
-#         logger.info(f"caption column defaulting to {caption_column}")
-#     else:
-#         caption_column = args.caption_column
-#         if caption_column not in column_names:
-#             raise ValueError(
-#                 f"`--caption_column` value '{args.caption_column}' not found in dataset columns. Dataset columns are: {', '.join(column_names)}"
-#             )
-
-#     if args.conditioning_image_column is None:
-#         conditioning_image_column = column_names[2]
-#         logger.info(f"conditioning image column defaulting to {conditioning_image_column}")
-#     else:
-#         conditioning_image_column = args.conditioning_image_column
-#         if conditioning_image_column not in column_names:
-#             raise ValueError(
-#                 f"`--conditioning_image_column` value '{args.conditioning_image_column}' not found in dataset columns. Dataset columns are: {', '.join(column_names)}"
-#             )
-
-#     def tokenize_captions(examples, is_train=True):
-#         captions = []
-#         for caption in examples[caption_column]:
-#             if random.random() < args.proportion_empty_prompts:
-#                 captions.append("")
-#             elif isinstance(caption, str):
-#                 captions.append(caption)
-#             elif isinstance(caption, (list, np.ndarray)):
-#                 # take a random caption if there are multiple
-#                 captions.append(random.choice(caption) if is_train else caption[0])
-#             else:
-#                 raise ValueError(
-#                     f"Caption column `{caption_column}` should contain either strings or lists of strings."
-#                 )
-#         inputs = tokenizer(
-#             captions, max_length=tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="pt"
-#         )
-#         return inputs.input_ids
-
-#     image_transforms = transforms.Compose(
-#         [
-#             transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-#             transforms.CenterCrop(args.resolution),
-#             transforms.ToTensor(),
-#             transforms.Normalize([0.5], [0.5]),
-#         ]
-#     )
-
-#     conditioning_image_transforms = transforms.Compose(
-#         [
-#             transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-#             transforms.CenterCrop(args.resolution),
-#             transforms.ToTensor(),
-#         ]
-#     )
-
-#     def preprocess_train(examples):
-#         images = [image.convert("RGB") for image in examples[image_column]]
-#         images = [image_transforms(image) for image in images]
-
-#         conditioning_images = [image.convert("RGB") for image in examples[conditioning_image_column]]
-#         conditioning_images = [conditioning_image_transforms(image) for image in conditioning_images]
-
-#         examples["pixel_values"] = images
-#         examples["conditioning_pixel_values"] = conditioning_images
-#         examples["input_ids"] = tokenize_captions(examples)
-
-#         return examples
-
-#     with accelerator.main_process_first():
-#         if args.max_train_samples is not None:
-#             dataset["train"] = dataset["train"].shuffle(seed=args.seed).select(range(args.max_train_samples))
-#         # Set the training transforms
-#         train_dataset = dataset["train"].with_transform(preprocess_train)
-
-#     return train_dataset
-
-
-# def collate_fn(examples):
-#     pixel_values = torch.stack([example["pixel_values"] for example in examples])
-#     pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
-
-#     conditioning_pixel_values = torch.stack([example["conditioning_pixel_values"] for example in examples])
-#     conditioning_pixel_values = conditioning_pixel_values.to(memory_format=torch.contiguous_format).float()
-
-#     masks = torch.stack([example["masks"] for example in examples])
-#     masks = masks.to(memory_format=torch.contiguous_format).float()
-
-#     input_ids = torch.stack([example["input_ids"] for example in examples])
-
-#     return {
-#         "pixel_values": pixel_values,
-#         "conditioning_pixel_values": conditioning_pixel_values,
-#         "masks":masks,
-#         "input_ids": input_ids,
-#     }
-
-
-def main(args):
-    if args.report_to == "wandb" and args.hub_token is not None:
+def main(args):  # args吸收完所有参数后，开始真正的main!
+    if args.report_to == "wandb" and args.hub_token is not None:  # 这里args.report_to='tensorboard'，所以这一段跳过了
         raise ValueError(
             "You cannot use both --report_to=wandb and --hub_token due to a security risk of exposing your token."
             " Please use `huggingface-cli login` to authenticate with the Hub."
@@ -935,7 +803,7 @@ def main(args):
 
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
 
-    accelerator = Accelerator(
+    accelerator = Accelerator(  # 这里配置accelerator
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
         log_with=args.report_to,
@@ -949,7 +817,7 @@ def main(args):
         level=logging.INFO,
     )
     logger.info(accelerator.state, main_process_only=False)
-    if accelerator.is_local_main_process:
+    if accelerator.is_local_main_process:  # accelerator.is_local_main_process为True，执行上面的if
         transformers.utils.logging.set_verbosity_warning()
         diffusers.utils.logging.set_verbosity_info()
     else:
@@ -957,15 +825,15 @@ def main(args):
         diffusers.utils.logging.set_verbosity_error()
 
     # If passed along, set the training seed now.
-    if args.seed is not None:
+    if args.seed is not None:  # args.seed=None，跳过
         set_seed(args.seed)
 
     # Handle the repository creation
-    if accelerator.is_main_process:
-        if args.output_dir is not None:
+    if accelerator.is_main_process:  # 为True，执行
+        if args.output_dir is not None:  # 为True，执行
             os.makedirs(args.output_dir, exist_ok=True)
 
-        if args.push_to_hub:
+        if args.push_to_hub:  # False，跳过
             repo_id = create_repo(
                 repo_id=args.hub_model_id or Path(args.output_dir).name, exist_ok=True, token=args.hub_token
             ).repo_id
@@ -973,36 +841,36 @@ def main(args):
     # Load the tokenizer
     if args.tokenizer_name:
         tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name, revision=args.revision, use_fast=False)
-    elif args.pretrained_model_name_or_path:
-        tokenizer = AutoTokenizer.from_pretrained(
+    elif args.pretrained_model_name_or_path:  # 为'runwayml/stable-diffusion-v1-5'
+        tokenizer = AutoTokenizer.from_pretrained(  # tokenizer为CLIPTokenizer: 49408
             args.pretrained_model_name_or_path,
             subfolder="tokenizer",
             revision=args.revision,
             use_fast=False,
         )
 
-    # import correct text encoder class
+    # import correct text encoder class  # text_encoder_cls是type。为CLIPTextModel
     text_encoder_cls = import_model_class_from_model_name_or_path(args.pretrained_model_name_or_path, args.revision)
 
-    # Load scheduler and models
+    # Load scheduler and models  # noise_scheduler为DDPMScheduler: 1000
     noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
     text_encoder = text_encoder_cls.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
-    )
+    )  # text_encoder就是把text_encoder_cls给加载成了真正的clip model
     vae = AutoencoderKL.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision, variant=args.variant
-    )
+    )  # 加载VAE
     unet = UNet2DConditionModel.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant
-    )
+    )  # 加载SD1.5的unet
 
     if args.brushnet_model_name_or_path:
         logger.info("Loading existing brushnet weights")
         brushnet = BrushNetModel.from_pretrained(args.brushnet_model_name_or_path)
     else:
         logger.info("Initializing brushnet weights from unet")
-        brushnet = BrushNetModel.from_unet(unet)
-
+        brushnet = BrushNetModel.from_unet(unet)  # 这是进入加载brushnetmodel的函数，从unet衍生出brushnet。migc搬过来的时候也要这样子搞一个！
+        # 上面这行代码相当于初始化成功了brushnet，我也需要这样子初始化migc，替换这个py文件下的普通unet
     # Taken from [Sayak Paul's Diffusers PR #6511](https://github.com/huggingface/diffusers/pull/6511/files)
     def unwrap_model(model):
         model = accelerator.unwrap_model(model)
@@ -1037,15 +905,15 @@ def main(args):
                 model.load_state_dict(load_model.state_dict())
                 del load_model
 
-        accelerator.register_save_state_pre_hook(save_model_hook)
+        accelerator.register_save_state_pre_hook(save_model_hook)  # 这两行还是在配accelerator
         accelerator.register_load_state_pre_hook(load_model_hook)
 
     vae.requires_grad_(False)
     unet.requires_grad_(False)
     text_encoder.requires_grad_(False)
     brushnet.train()
-
-    if args.enable_xformers_memory_efficient_attention:
+    # vae、unet、text_encoder都不需要梯度，所以全为False。不过我需要把unet换成migc的，所以这里的unet得动点手脚
+    if args.enable_xformers_memory_efficient_attention:  # 没有这种东西，跳过
         if is_xformers_available():
             import xformers
 
@@ -1059,7 +927,7 @@ def main(args):
         else:
             raise ValueError("xformers is not available. Make sure it is installed correctly")
 
-    if args.gradient_checkpointing:
+    if args.gradient_checkpointing:  # False，跳过
         brushnet.enable_gradient_checkpointing()
 
     # Check that all trainable models are in full precision
@@ -1075,16 +943,16 @@ def main(args):
 
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
-    if args.allow_tf32:
+    if args.allow_tf32:  # False，跳过
         torch.backends.cuda.matmul.allow_tf32 = True
 
-    if args.scale_lr:
+    if args.scale_lr:  # False，跳过
         args.learning_rate = (
             args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
         )
 
     # Use 8-bit Adam for lower memory usage or to fine-tune the model in 16GB GPUs
-    if args.use_8bit_adam:
+    if args.use_8bit_adam:  # False，执行else部分
         try:
             import bitsandbytes as bnb
         except ImportError:
@@ -1094,7 +962,7 @@ def main(args):
 
         optimizer_class = bnb.optim.AdamW8bit
     else:
-        optimizer_class = torch.optim.AdamW
+        optimizer_class = torch.optim.AdamW  # 使用AdamW优化器
 
     # Optimizer creation
     params_to_optimize = brushnet.parameters()
@@ -1104,7 +972,7 @@ def main(args):
         betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
         eps=args.adam_epsilon,
-    )
+    )  # optimizer就是优化器AdamW
 
     # train_dataset = make_train_dataset(args, tokenizer, accelerator)
 
@@ -1133,8 +1001,8 @@ def main(args):
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
     num_update_steps_per_epoch = math.ceil(train_dataloader_len / args.gradient_accumulation_steps)
-    if args.max_train_steps is None:
-        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+    if args.max_train_steps is None:  # num_update_steps_per_epoch=10000
+        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch  # 10000*10000,所以出现了一亿
         overrode_max_train_steps = True
 
     lr_scheduler = get_scheduler(
@@ -1144,7 +1012,7 @@ def main(args):
         num_training_steps=args.max_train_steps * accelerator.num_processes,
         num_cycles=args.lr_num_cycles,
         power=args.lr_power,
-    )
+    )  # 基于optimizer(AdamW)，设置base_lrs和lr_lambdas
 
     # Prepare everything with our `accelerator`.
     brushnet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
@@ -1160,8 +1028,8 @@ def main(args):
         weight_dtype = torch.bfloat16
 
     # Move vae, unet and text_encoder to device and cast to weight_dtype
-    vae.to(accelerator.device, dtype=weight_dtype)
-    unet.to(accelerator.device, dtype=weight_dtype)
+    vae.to(accelerator.device, dtype=weight_dtype)  # accelerator.device为Cuda，也就是说把vae、unet、text_encoder放到GPU上面去
+    unet.to(accelerator.device, dtype=weight_dtype)  # weight_type为torch.float32
     text_encoder.to(accelerator.device, dtype=weight_dtype)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
@@ -1176,7 +1044,7 @@ def main(args):
     if accelerator.is_main_process:
         tracker_config = dict(vars(args))
 
-        # tensorboard cannot handle list types for config
+        # tensorboard cannot handle list types for config  # 取出4个tensorboard无法处理的kv对
         tracker_config.pop("validation_prompt")
         tracker_config.pop("validation_image")
         tracker_config.pop("validation_mask")
@@ -1184,9 +1052,9 @@ def main(args):
 
         accelerator.init_trackers(args.tracker_project_name, config=tracker_config)
 
-    # Train!
+    # Train!  # 在这里正式开始训练。之前的所有代码都在配置相关module
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
-
+    # total_batch_size就是1
     logger.info("***** Running training *****")
     logger.info(f"  Num examples = {train_dataset_len}")
     logger.info(f"  Num batches each epoch = {train_dataloader_len}")
@@ -1225,7 +1093,7 @@ def main(args):
     else:
         initial_global_step = 0
 
-    progress_bar = tqdm(
+    progress_bar = tqdm(  # tqdm生成训练流程的bar
         range(0, args.max_train_steps),
         initial=initial_global_step,
         desc="Steps",
@@ -1236,15 +1104,15 @@ def main(args):
     image_logs = None
     for epoch in range(first_epoch, args.num_train_epochs):
         for step, batch in enumerate(train_dataloader):
-            with accelerator.accumulate(brushnet):
-                # Convert images to latent space
+            with accelerator.accumulate(brushnet):  # batch里面会多一个b维度，image会变成(1, 3, 512, 512)
+                # Convert images to latent space  # pixel_values是input image
                 latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
                 latents = latents * vae.config.scaling_factor
-
+                # latents: (1, 4, 64, 64)
                 conditioning_latents=vae.encode(batch["conditioning_pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
                 conditioning_latents = conditioning_latents * vae.config.scaling_factor
-
-                masks = torch.nn.functional.interpolate(
+                # conditioning_latents是masked_image enc之后的，为(1, 4, 64, 64)
+                masks = torch.nn.functional.interpolate(  # 这里是paper里说的插值，把(1, 512, 512)的mask变成(1, 64, 64)
                     batch["masks"], 
                     size=(
                         latents.shape[-2], 
@@ -1253,19 +1121,19 @@ def main(args):
                 )
 
                 conditioning_latents=torch.concat([conditioning_latents,masks],1)
-
+                # 这里把1channel的mask和4channel的encoded masked_image叠起来，之后会再叠加上4channel的noise_latents
                 # Sample noise that we'll add to the latents
-                noise = torch.randn_like(latents)
+                noise = torch.randn_like(latents)  # 服从0-1高斯分布，采样出一个和latents一样size的噪声(1, 4, 64, 64)
                 bsz = latents.shape[0]
                 # Sample a random timestep for each image
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
                 timesteps = timesteps.long()
 
                 # Add noise to the latents according to the noise magnitude at each timestep
-                # (this is the forward diffusion process)
+                # (this is the forward diffusion process)  # 这确实是前向过程
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
-                # Get the text embedding for conditioning
+                # Get the text embedding for conditioning  # 把(1, 77)的caption embed成(1, 77, 768)的vector
                 encoder_hidden_states = text_encoder(batch["input_ids"], return_dict=False)[0]
 
                 down_block_res_samples, mid_block_res_sample, up_block_res_samples = brushnet(
@@ -1290,7 +1158,7 @@ def main(args):
                     ],
                     return_dict=False,
                 )[0]
-
+                # 上面的brushnet和unet无法进去调试，这是一个有疑惑的地方
                 # Get the target for loss depending on the prediction type
                 if noise_scheduler.config.prediction_type == "epsilon":
                     target = noise
@@ -1299,8 +1167,8 @@ def main(args):
                 else:
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
                 loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
-
-                accelerator.backward(loss)
+                # loss就是sd model的经典Loss，target是采样的noise，model_pred是unet预测的noise
+                accelerator.backward(loss)  # 反向传播，更新优化器，更新学习率等等常见步骤
                 if accelerator.sync_gradients:
                     params_to_clip = brushnet.parameters()
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
@@ -1360,7 +1228,7 @@ def main(args):
                 break
 
     # Create the pipeline using using the trained modules and save it.
-    accelerator.wait_for_everyone()
+    accelerator.wait_for_everyone()  # 这主要是save brushnet的权重。我也得这样做来save migc的权重
     if accelerator.is_main_process:
         brushnet = unwrap_model(brushnet)
         brushnet.save_pretrained(args.output_dir)
@@ -1399,5 +1267,5 @@ def main(args):
 
 
 if __name__ == "__main__":
-    args = parse_args()
+    args = parse_args()  # 从这里开始进入训练流程！args配参数的，没啥必要F7
     main(args)

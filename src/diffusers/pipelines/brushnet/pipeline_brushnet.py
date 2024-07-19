@@ -125,7 +125,7 @@ def retrieve_timesteps(
     return timesteps, num_inference_steps
 
 
-class StableDiffusionBrushNetPipeline(
+class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了StableDiffusionPipeline
     DiffusionPipeline,
     StableDiffusionMixin,
     TextualInversionLoaderMixin,
@@ -173,7 +173,7 @@ class StableDiffusionBrushNetPipeline(
     _exclude_from_cpu_offload = ["safety_checker"]
     _callback_tensor_inputs = ["latents", "prompt_embeds", "negative_prompt_embeds"]
 
-    def __init__(
+    def __init__(  # 这一块的参数，除了多了一个brushnet，其他的与migc一致
         self,
         vae: AutoencoderKL,
         text_encoder: CLIPTextModel,
@@ -215,12 +215,12 @@ class StableDiffusionBrushNetPipeline(
             feature_extractor=feature_extractor,
             image_encoder=image_encoder,
         )
-        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
+        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)  # 8
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor, do_convert_rgb=True)
         self.register_to_config(requires_safety_checker=requires_safety_checker)
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline._encode_prompt
-    def _encode_prompt(
+    def _encode_prompt(  # 这里比migc多一个lora_scale，不知道是干啥的？
         self,
         prompt,
         device,
@@ -343,7 +343,7 @@ class StableDiffusionBrushNetPipeline(
             else:
                 attention_mask = None
 
-            if clip_skip is None:
+            if clip_skip is None:  # 多出来个clip_skip，不知道是啥？
                 prompt_embeds = self.text_encoder(text_input_ids.to(device), attention_mask=attention_mask)
                 prompt_embeds = prompt_embeds[0]
             else:
@@ -366,7 +366,7 @@ class StableDiffusionBrushNetPipeline(
             prompt_embeds_dtype = self.unet.dtype
         else:
             prompt_embeds_dtype = prompt_embeds.dtype
-
+        # 上面6行migc没有
         prompt_embeds = prompt_embeds.to(dtype=prompt_embeds_dtype, device=device)
 
         bs_embed, seq_len, _ = prompt_embeds.shape
@@ -378,7 +378,7 @@ class StableDiffusionBrushNetPipeline(
         if do_classifier_free_guidance and negative_prompt_embeds is None:
             uncond_tokens: List[str]
             if negative_prompt is None:
-                uncond_tokens = [""] * batch_size
+                uncond_tokens = [""] * batch_size  # 这段代码有问题？即使有negative_prompt，uncond_tokens也和其无关
             elif prompt is not None and type(prompt) is not type(negative_prompt):
                 raise TypeError(
                     f"`negative_prompt` should be the same type to `prompt`, but got {type(negative_prompt)} !="
@@ -834,8 +834,8 @@ class StableDiffusionBrushNetPipeline(
         prompt: Union[str, List[str]] = None,
         image: PipelineImageInput = None,
         mask: PipelineImageInput = None,
-        height: Optional[int] = None,
-        width: Optional[int] = None,
+        height: Optional[int] = None,  # paper中说的是灵活输入size，所以这里是None，而MIGC是512  # 错误。migc中的call也是None
+        width: Optional[int] = None,  # paper中说的是灵活输入size，所以这里是None，而MIGC是512  # 错误。migc中的call也是None
         num_inference_steps: int = 50,
         timesteps: List[int] = None,
         guidance_scale: float = 7.5,
@@ -850,7 +850,7 @@ class StableDiffusionBrushNetPipeline(
         ip_adapter_image_embeds: Optional[List[torch.FloatTensor]] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
-        cross_attention_kwargs: Optional[Dict[str, Any]] = None,
+        cross_attention_kwargs: Optional[Dict[str, Any]] = None,  # additional branch删除了cross_attention layers，为什么会有相关输入？
         brushnet_conditioning_scale: Union[float, List[float]] = 1.0,
         guess_mode: bool = False,
         control_guidance_start: Union[float, List[float]] = 0.0,

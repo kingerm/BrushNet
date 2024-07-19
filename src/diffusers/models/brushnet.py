@@ -135,7 +135,7 @@ class BrushNetModel(ModelMixin, ConfigMixin):
     _supports_gradient_checkpointing = True
 
     @register_to_config
-    def __init__(
+    def __init__(  # 由cls()进入这里(在本py文件的line479)，初始化BrushNetModel
         self,
         in_channels: int = 4,
         conditioning_channels: int = 5,
@@ -450,7 +450,7 @@ class BrushNetModel(ModelMixin, ConfigMixin):
 
 
     @classmethod
-    def from_unet(
+    def from_unet(  # 只输入了unet，其他参数均为default
         cls,
         unet: UNet2DConditionModel,
         brushnet_conditioning_channel_order: str = "rgb",
@@ -466,7 +466,7 @@ class BrushNetModel(ModelMixin, ConfigMixin):
                 The UNet model weights to copy to the [`BrushNetModel`]. All configuration options are also copied
                 where applicable.
         """
-        transformer_layers_per_block = (
+        transformer_layers_per_block = (  # 为1
             unet.config.transformer_layers_per_block if "transformer_layers_per_block" in unet.config else 1
         )
         encoder_hid_dim = unet.config.encoder_hid_dim if "encoder_hid_dim" in unet.config else None
@@ -475,8 +475,8 @@ class BrushNetModel(ModelMixin, ConfigMixin):
         addition_time_embed_dim = (
             unet.config.addition_time_embed_dim if "addition_time_embed_dim" in unet.config else None
         )
-
-        brushnet = cls(
+        # 上面四个值都是None
+        brushnet = cls(  # cls进入class BrushNetModel(ModelMixin, ConfigMixin)完成brushnet初始化
             in_channels=unet.config.in_channels,
             conditioning_channels=conditioning_channels,
             flip_sin_to_cos=unet.config.flip_sin_to_cos,
@@ -510,7 +510,7 @@ class BrushNetModel(ModelMixin, ConfigMixin):
             conditioning_embedding_out_channels=conditioning_embedding_out_channels,
         )
 
-        if load_weights_from_unet:
+        if load_weights_from_unet:  # 为True。从unet中提取参数，塞进brushnet里面
             conv_in_condition_weight=torch.zeros_like(brushnet.conv_in_condition.weight)
             conv_in_condition_weight[:,:4,...]=unet.conv_in.weight
             conv_in_condition_weight[:,4:8,...]=unet.conv_in.weight
