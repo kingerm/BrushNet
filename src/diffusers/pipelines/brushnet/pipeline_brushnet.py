@@ -24,7 +24,13 @@ from ...utils.torch_utils import is_compiled_module, is_torch_version, randn_ten
 from ..pipeline_utils import DiffusionPipeline, StableDiffusionMixin
 from ..stable_diffusion.pipeline_output import StableDiffusionPipelineOutput
 from ..stable_diffusion.safety_checker import StableDiffusionSafetyChecker
-
+# 下面是migc需要的import
+from ..stable_diffusion import StableDiffusionPipeline
+# import sys
+# sys.path.append('/home/xkzhu/yhx/BrushNet/examples/brushnet/')
+# from migc.migc_arch import MIGC, NaiveFuser
+from scipy.ndimage import uniform_filter, gaussian_filter
+from torch.cuda.amp import autocast as autocast
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -132,6 +138,7 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
     LoraLoaderMixin,
     IPAdapterMixin,
     FromSingleFileMixin,
+    # StableDiffusionPipeline  # 把migc的pipeline加过来
 ):
     r"""
     Pipeline for text-to-image generation using Stable Diffusion with BrushNet guidance.
@@ -168,6 +175,7 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
             A `CLIPImageProcessor` to extract features from generated images; used as inputs to the `safety_checker`.
     """
 
+    #
     model_cpu_offload_seq = "text_encoder->image_encoder->unet->vae"
     _optional_components = ["safety_checker", "feature_extractor", "image_encoder"]
     _exclude_from_cpu_offload = ["safety_checker"]
@@ -218,6 +226,8 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)  # 8
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor, do_convert_rgb=True)
         self.register_to_config(requires_safety_checker=requires_safety_checker)
+        self.instance_set = set()
+        self.embedding = {}
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline._encode_prompt
     def _encode_prompt(  # 这里比migc多一个lora_scale，不知道是干啥的？
@@ -254,22 +264,20 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.encode_prompt
     def encode_prompt(
-        self,
-        prompt,
-        device,
-        num_images_per_prompt,
-        do_classifier_free_guidance,
-        negative_prompt=None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-        lora_scale: Optional[float] = None,
-        clip_skip: Optional[int] = None,
-    ):
+            self,
+            prompts,
+            device,
+            num_images_per_prompt,
+            do_classifier_free_guidance,
+            negative_prompt=None,
+            prompt_embeds: Optional[torch.FloatTensor] = None,
+            negative_prompt_embeds: Optional[torch.FloatTensor] = None,
+    ):   # 这里面的float32得改成float16
         r"""
         Encodes the prompt into text encoder hidden states.
 
         Args:
-            prompt (`str` or `List[str]`, *optional*):
+             prompt (`str` or `List[str]`, *optional*):
                 prompt to be encoded
             device: (`torch.device`):
                 torch device
@@ -288,112 +296,87 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
                 Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
                 argument.
-            lora_scale (`float`, *optional*):
-                A LoRA scale that will be applied to all LoRA layers of the text encoder if LoRA layers are loaded.
-            clip_skip (`int`, *optional*):
-                Number of layers to be skipped from CLIP while computing the prompt embeddings. A value of 1 means that
-                the output of the pre-final layer will be used for computing the prompt embeddings.
         """
-        # set lora scale so that monkey patched LoRA
-        # function of text encoder can correctly access it
-        if lora_scale is not None and isinstance(self, LoraLoaderMixin):
-            self._lora_scale = lora_scale
-
-            # dynamically adjust the LoRA scale
-            if not USE_PEFT_BACKEND:
-                adjust_lora_scale_text_encoder(self.text_encoder, lora_scale)
-            else:
-                scale_lora_layers(self.text_encoder, lora_scale)
-
-        if prompt is not None and isinstance(prompt, str):
+        if prompts is not None and isinstance(prompts, str):
             batch_size = 1
-        elif prompt is not None and isinstance(prompt, list):
-            batch_size = len(prompt)
+        elif prompts is not None and isinstance(prompts, list):
+            batch_size = len(prompts)
         else:
             batch_size = prompt_embeds.shape[0]
 
-        if prompt_embeds is None:
-            # textual inversion: process multi-vector tokens if necessary
-            if isinstance(self, TextualInversionLoaderMixin):
-                prompt = self.maybe_convert_prompt(prompt, self.tokenizer)
+        prompt_embeds_none_flag = (prompt_embeds is None)
+        prompt_embeds_list = []
+        embeds_pooler_list = []
+        for prompt in prompts:
+            if prompt_embeds_none_flag:
+                # textual inversion: procecss multi-vector tokens if necessary
+                if isinstance(self, TextualInversionLoaderMixin):
+                    prompt = self.maybe_convert_prompt(prompt, self.tokenizer)
 
-            text_inputs = self.tokenizer(
-                prompt,
-                padding="max_length",
-                max_length=self.tokenizer.model_max_length,
-                truncation=True,
-                return_tensors="pt",
-            )
-            text_input_ids = text_inputs.input_ids
-            untruncated_ids = self.tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
-
-            if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(
-                text_input_ids, untruncated_ids
-            ):
-                removed_text = self.tokenizer.batch_decode(
-                    untruncated_ids[:, self.tokenizer.model_max_length - 1 : -1]
+                text_inputs = self.tokenizer(
+                    prompt,
+                    padding="max_length",
+                    max_length=self.tokenizer.model_max_length,
+                    truncation=True,
+                    return_tensors="pt",
                 )
-                logger.warning(
-                    "The following part of your input was truncated because CLIP can only handle sequences up to"
-                    f" {self.tokenizer.model_max_length} tokens: {removed_text}"
-                )
+                text_input_ids = text_inputs.input_ids
+                untruncated_ids = self.tokenizer(
+                    prompt, padding="longest", return_tensors="pt"
+                ).input_ids
 
-            if hasattr(self.text_encoder.config, "use_attention_mask") and self.text_encoder.config.use_attention_mask:
-                attention_mask = text_inputs.attention_mask.to(device)
-            else:
-                attention_mask = None
+                if untruncated_ids.shape[-1] >= text_input_ids.shape[
+                    -1
+                ] and not torch.equal(text_input_ids, untruncated_ids):
+                    removed_text = self.tokenizer.batch_decode(
+                        untruncated_ids[:, self.tokenizer.model_max_length - 1: -1]
+                    )
+                    logger.warning(
+                        "The following part of your input was truncated because CLIP can only handle sequences up to"
+                        f" {self.tokenizer.model_max_length} tokens: {removed_text}"
+                    )
 
-            if clip_skip is None:  # 多出来个clip_skip，不知道是啥？
-                prompt_embeds = self.text_encoder(text_input_ids.to(device), attention_mask=attention_mask)
-                prompt_embeds = prompt_embeds[0]
-            else:
+                if (
+                        hasattr(self.text_encoder.config, "use_attention_mask")
+                        and self.text_encoder.config.use_attention_mask
+                ):
+                    attention_mask = text_inputs.attention_mask.to(device)
+                else:
+                    attention_mask = None
+
                 prompt_embeds = self.text_encoder(
-                    text_input_ids.to(device), attention_mask=attention_mask, output_hidden_states=True
+                    text_input_ids.to(device),
+                    attention_mask=attention_mask,
                 )
-                # Access the `hidden_states` first, that contains a tuple of
-                # all the hidden states from the encoder layers. Then index into
-                # the tuple to access the hidden states from the desired layer.
-                prompt_embeds = prompt_embeds[-1][-(clip_skip + 1)]
-                # We also need to apply the final LayerNorm here to not mess with the
-                # representations. The `last_hidden_states` that we typically use for
-                # obtaining the final prompt representations passes through the LayerNorm
-                # layer.
-                prompt_embeds = self.text_encoder.text_model.final_layer_norm(prompt_embeds)
+                embeds_pooler = prompt_embeds.pooler_output  # 这是比brushnet多出来的一行
+                prompt_embeds = prompt_embeds[0]
+                # embeds_pooler和prompt_embeds都是float16
+            prompt_embeds = prompt_embeds.to(dtype=self.text_encoder.dtype, device=device)
+            # 下面的部分涉及到embeds_pooler的部分brushnet没有，差异开始突显
+            embeds_pooler = embeds_pooler.to(dtype=self.text_encoder.dtype, device=device)
 
-        if self.text_encoder is not None:
-            prompt_embeds_dtype = self.text_encoder.dtype
-        elif self.unet is not None:
-            prompt_embeds_dtype = self.unet.dtype
-        else:
-            prompt_embeds_dtype = prompt_embeds.dtype
-        # 上面6行migc没有
-        prompt_embeds = prompt_embeds.to(dtype=prompt_embeds_dtype, device=device)
-
-        bs_embed, seq_len, _ = prompt_embeds.shape
-        # duplicate text embeddings for each generation per prompt, using mps friendly method
-        prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
-        prompt_embeds = prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
+            bs_embed, seq_len, _ = prompt_embeds.shape
+            # duplicate text embeddings for each generation per prompt, using mps friendly method  # 看不懂
+            prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
+            embeds_pooler = embeds_pooler.repeat(1, num_images_per_prompt)
+            prompt_embeds = prompt_embeds.view(
+                bs_embed * num_images_per_prompt, seq_len, -1
+            )
+            embeds_pooler = embeds_pooler.view(
+                bs_embed * num_images_per_prompt, -1
+            )
+            prompt_embeds_list.append(prompt_embeds)
+            embeds_pooler_list.append(embeds_pooler)
+        prompt_embeds = torch.cat(prompt_embeds_list, dim=0)
+        embeds_pooler = torch.cat(embeds_pooler_list, dim=0)
+        # negative_prompt_embeds: (prompt_nums[0]+prompt_nums[1]+...prompt_nums[n], token_num, token_channel), <class 'torch.Tensor'>
 
         # get unconditional embeddings for classifier free guidance
         if do_classifier_free_guidance and negative_prompt_embeds is None:
             uncond_tokens: List[str]
             if negative_prompt is None:
-                uncond_tokens = [""] * batch_size  # 这段代码有问题？即使有negative_prompt，uncond_tokens也和其无关
-            elif prompt is not None and type(prompt) is not type(negative_prompt):
-                raise TypeError(
-                    f"`negative_prompt` should be the same type to `prompt`, but got {type(negative_prompt)} !="
-                    f" {type(prompt)}."
-                )
-            elif isinstance(negative_prompt, str):
-                uncond_tokens = [negative_prompt]
-            elif batch_size != len(negative_prompt):
-                raise ValueError(
-                    f"`negative_prompt`: {negative_prompt} has batch size {len(negative_prompt)}, but `prompt`:"
-                    f" {prompt} has batch size {batch_size}. Please make sure that passed `negative_prompt` matches"
-                    " the batch size of `prompt`."
-                )
-            else:
-                uncond_tokens = negative_prompt
+                negative_prompt = "worst quality, low quality, bad anatomy"
+            uncond_tokens = [negative_prompt] * batch_size
 
             # textual inversion: process multi-vector tokens if necessary
             if isinstance(self, TextualInversionLoaderMixin):
@@ -408,7 +391,10 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
                 return_tensors="pt",
             )
 
-            if hasattr(self.text_encoder.config, "use_attention_mask") and self.text_encoder.config.use_attention_mask:
+            if (
+                    hasattr(self.text_encoder.config, "use_attention_mask")
+                    and self.text_encoder.config.use_attention_mask
+            ):
                 attention_mask = uncond_input.attention_mask.to(device)
             else:
                 attention_mask = None
@@ -423,16 +409,25 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
             # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
             seq_len = negative_prompt_embeds.shape[1]
 
-            negative_prompt_embeds = negative_prompt_embeds.to(dtype=prompt_embeds_dtype, device=device)
+            negative_prompt_embeds = negative_prompt_embeds.to(
+                dtype=self.text_encoder.dtype, device=device
+            )
 
-            negative_prompt_embeds = negative_prompt_embeds.repeat(1, num_images_per_prompt, 1)
-            negative_prompt_embeds = negative_prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
+            negative_prompt_embeds = negative_prompt_embeds.repeat(
+                1, num_images_per_prompt, 1
+            )
+            negative_prompt_embeds = negative_prompt_embeds.view(
+                batch_size * num_images_per_prompt, seq_len, -1
+            )
+            # negative_prompt_embeds: (len(prompt_nums), token_num, token_channel), <class 'torch.Tensor'>
 
-        if isinstance(self, LoraLoaderMixin) and USE_PEFT_BACKEND:
-            # Retrieve the original scale by scaling back the LoRA layers
-            unscale_lora_layers(self.text_encoder, lora_scale)
+            # For classifier free guidance, we need to do two forward passes.
+            # Here we concatenate the unconditional and text embeddings into a single batch
+            # to avoid doing two forward passes
+            final_prompt_embeds = torch.cat(
+                [negative_prompt_embeds, prompt_embeds])  # 这是Migc的特殊之处。需要搞清楚为什么need to do two forward passes?
 
-        return prompt_embeds, negative_prompt_embeds
+        return final_prompt_embeds, prompt_embeds, embeds_pooler[:, None, :]
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.encode_image
     def encode_image(self, image, device, num_images_per_prompt, output_hidden_states=None):
@@ -829,6 +824,7 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
 
     @torch.no_grad()
     @replace_example_docstring(EXAMPLE_DOC_STRING)
+    @autocast(True)
     def __call__(
         self,
         prompt: Union[str, List[str]] = None,
@@ -858,6 +854,18 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
         clip_skip: Optional[int] = None,
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
+        # 加入migc相关形参
+        bboxes: List[List[List[float]]] = None,
+        MIGCsteps=25,
+        NaiveFuserSteps=-1,
+        ca_scale=None,
+        ea_scale=None,
+        sac_scale=None,
+        aug_phase_with_and=False,
+        sa_preserve=False,
+        use_sa_preserve=False,
+        clear_set=False,
+        GUI_progress=None,
         **kwargs,
     ):
         r"""
@@ -974,7 +982,16 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
                 second element is a list of `bool`s indicating whether the corresponding generated image contains
                 "not-safe-for-work" (nsfw) content.
         """
-
+        def aug_phase_with_and_function(phase, instance_num):  # 从pipe(*arg)那一块进来
+            instance_num = min(instance_num, 7)
+            copy_phase = [phase] * instance_num
+            phase = ', and '.join(copy_phase)
+            return phase
+        if aug_phase_with_and:
+            instance_num = len(prompt[0]) - 1
+            for i in range(1, len(prompt[0])):
+                prompt[0][i] = aug_phase_with_and_function(prompt[0][i],
+                                                            instance_num)
         callback = kwargs.pop("callback", None)
         callback_steps = kwargs.pop("callback_steps", None)
 
@@ -1003,9 +1020,13 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
                 [control_guidance_start],
                 [control_guidance_end],
             )
+        # 这个0.是migc相关
+        # 0. Default height and width to unet
+        height = height or self.unet.config.sample_size * self.vae_scale_factor
+        width = width or self.unet.config.sample_size * self.vae_scale_factor  # h=w=512
 
         # 1. Check inputs. Raise error if not correct
-        self.check_inputs(
+        self.check_inputs(  # prompt换成list[list[str]]形式也没事
             prompt,
             image,
             mask,
@@ -1041,12 +1062,16 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
             else brushnet.nets[0].config.global_pool_conditions
         )
         guess_mode = guess_mode or global_pool_conditions
-
+        # 加上migc
+        prompt_nums = [0] * len(prompt)  # 这个[0]有点抽象，先标记一手
+        for i, _ in enumerate(prompt):
+            prompt_nums[i] = len(_)
         # 3. Encode input prompt
         text_encoder_lora_scale = (
             self.cross_attention_kwargs.get("scale", None) if self.cross_attention_kwargs is not None else None
         )
-        prompt_embeds, negative_prompt_embeds = self.encode_prompt(
+        # prompt_embeds, cond_prompt_embeds, embeds_pooler都是float16
+        prompt_embeds, cond_prompt_embeds, embeds_pooler = self.encode_prompt(
             prompt,
             device,
             num_images_per_prompt,
@@ -1054,14 +1079,13 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
             negative_prompt,
             prompt_embeds=prompt_embeds,
             negative_prompt_embeds=negative_prompt_embeds,
-            lora_scale=text_encoder_lora_scale,
-            clip_skip=self.clip_skip,
-        )
+        )  # 这一段也没问题嗷
         # For classifier free guidance, we need to do two forward passes.
         # Here we concatenate the unconditional and text embeddings into a single batch
         # to avoid doing two forward passes
-        if self.do_classifier_free_guidance:
-            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
+
+        # if self.do_classifier_free_guidance:
+        #     prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
 
         if ip_adapter_image is not None or ip_adapter_image_embeds is not None:
             image_embeds = self.prepare_ip_adapter_image_embeds(
@@ -1074,7 +1098,7 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
 
         # 4. Prepare image
         if isinstance(brushnet, BrushNetModel):
-            image = self.prepare_image(
+            image = self.prepare_image(  # image也是float16
                 image=image,
                 width=width,
                 height=height,
@@ -1085,7 +1109,7 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
                 do_classifier_free_guidance=self.do_classifier_free_guidance,
                 guess_mode=guess_mode,
             )
-            original_mask = self.prepare_image(
+            original_mask = self.prepare_image(  # original_mask也是float16
                 image=mask,
                 width=width,
                 height=height,
@@ -1101,13 +1125,14 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
         else:
             assert False
 
-        # 5. Prepare timesteps
+        # 5. Prepare timesteps  # timesteps是float32，得改成float16
         timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
+        timesteps = timesteps.half()
         self._num_timesteps = len(timesteps)
 
         # 6. Prepare latent variables
         num_channels_latents = self.unet.config.in_channels
-        latents, noise = self.prepare_latents(
+        latents, noise = self.prepare_latents(  # latents在这里被初始化，之前都是None。所以要进去修改源头才行
             batch_size * num_images_per_prompt,
             num_channels_latents,
             height,
@@ -1116,7 +1141,7 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
             device,
             generator,
             latents,
-        )
+        )  # latents和noise都是float16
 
         # 6.1 prepare condition latents
         conditioning_latents=self.vae.encode(image).latent_dist.sample() * self.vae.config.scaling_factor
@@ -1128,8 +1153,7 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
                     )
                 )
         conditioning_latents = torch.concat([conditioning_latents,mask],1)
-
-
+        # conditioning_latents, mask都是float16
         # 6.5 Optionally get Guidance Scale Embedding
         timestep_cond = None
         if self.unet.config.time_cond_proj_dim is not None:
@@ -1159,6 +1183,32 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
 
         # 8. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
+        if clear_set:
+            self.instance_set = set()
+            self.embedding = {}
+
+        now_set = set()
+        for i in range(len(bboxes[0])):
+            now_set.add((tuple(bboxes[0][i]), prompt[0][i + 1]))
+
+        mask_set = (now_set | self.instance_set) - (now_set & self.instance_set)
+        self.instance_set = now_set
+
+        guidance_mask = np.full((4, height // 8, width // 8), 1.0)
+
+        for bbox, _ in mask_set:  # 这个5是什么意思？为什么会是5？
+            w_min = max(0, int(width * bbox[0] // 8) - 5)
+            w_max = min(width, int(width * bbox[2] // 8) + 5)
+            h_min = max(0, int(height * bbox[1] // 8) - 5)
+            h_max = min(height, int(height * bbox[3] // 8) + 5)
+            guidance_mask[:, h_min:h_max, w_min:w_max] = 0
+
+        kernal_size = 5
+        guidance_mask = uniform_filter(
+            guidance_mask, axes=(1, 2), size=kernal_size
+        )
+        # guidance_mask是float64，也需要转为float16
+        guidance_mask = torch.from_numpy(guidance_mask).to(self.device).unsqueeze(0)
         is_unet_compiled = is_compiled_module(self.unet)
         is_brushnet_compiled = is_compiled_module(self.brushnet)
         is_torch_higher_equal_2_1 = is_torch_version(">=", "2.1")
@@ -1171,6 +1221,24 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                # 先看看latent_model_input是否符合migc？
+                # predict the noise residual
+                cross_attention_kwargs = {'prompt_nums': prompt_nums,
+                                          'bboxes': bboxes,
+                                          'ith': i,
+                                          'embeds_pooler': embeds_pooler,
+                                          'timestep': t,
+                                          'height': height,
+                                          'width': width,
+                                          'MIGCsteps': MIGCsteps,
+                                          'NaiveFuserSteps': NaiveFuserSteps,
+                                          'ca_scale': ca_scale,
+                                          'ea_scale': ea_scale,
+                                          'sac_scale': sac_scale,
+                                          'sa_preserve': sa_preserve,
+                                          'use_sa_preserve': use_sa_preserve}
+
+                self.unet.eval()
 
                 # brushnet(s) inference
                 if guess_mode and self.do_classifier_free_guidance:
@@ -1178,7 +1246,7 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
                     control_model_input = latents
                     control_model_input = self.scheduler.scale_model_input(control_model_input, t)
                     brushnet_prompt_embeds = prompt_embeds.chunk(2)[1]
-                else:
+                else:  # 走的是else部分，所以brushnet_prompt_embeds就是prompt_embeds
                     control_model_input = latent_model_input
                     brushnet_prompt_embeds = prompt_embeds
 
@@ -1189,7 +1257,7 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
                     if isinstance(brushnet_cond_scale, list):
                         brushnet_cond_scale = brushnet_cond_scale[0]
                     cond_scale = brushnet_cond_scale * brushnet_keep[i]
-
+                # 问题出在这儿，down_block_res_samples, mid_block_res_sample, up_block_res_samples全是torch.float16
                 down_block_res_samples, mid_block_res_sample, up_block_res_samples = self.brushnet(
                     control_model_input,
                     t,
@@ -1199,7 +1267,6 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
                     guess_mode=guess_mode,
                     return_dict=False,
                 )
-
                 if guess_mode and self.do_classifier_free_guidance:
                     # Infered BrushNet only for the conditional batch.
                     # To apply the output of BrushNet to both the unconditional and conditional batches,
@@ -1207,14 +1274,14 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
                     down_block_res_samples = [torch.cat([torch.zeros_like(d), d]) for d in down_block_res_samples]
                     mid_block_res_sample = torch.cat([torch.zeros_like(mid_block_res_sample), mid_block_res_sample])
                     up_block_res_samples = [torch.cat([torch.zeros_like(d), d]) for d in up_block_res_samples]
-
-                # predict the noise residual
+                # predict the noise residual  # 这里很可能会出问题，因为unet不一样了，不知道brushnet还能不能加进来
+                # 看起来这里很有问题，是个难点
                 noise_pred = self.unet(
                     latent_model_input,
                     t,
                     encoder_hidden_states=prompt_embeds,
                     timestep_cond=timestep_cond,
-                    cross_attention_kwargs=self.cross_attention_kwargs,
+                    cross_attention_kwargs=cross_attention_kwargs,
                     down_block_add_samples=down_block_res_samples,
                     mid_block_add_sample=mid_block_res_sample,
                     up_block_add_samples=up_block_res_samples,
@@ -1227,25 +1294,47 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
 
+                # 这里下去就很不一样了，先调试前面部分
                 # compute the previous noisy sample x_t -> x_t-1
-                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
-
-                if callback_on_step_end is not None:
-                    callback_kwargs = {}
-                    for k in callback_on_step_end_tensor_inputs:
-                        callback_kwargs[k] = locals()[k]
-                    callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
-
-                    latents = callback_outputs.pop("latents", latents)
-                    prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-                    negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
+                # latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+                step_output = self.scheduler.step(
+                    noise_pred, t, latents, **extra_step_kwargs
+                )
+                latents = step_output.prev_sample
+                # self.scheduler.step和migc不一样的原因是Scheduler的选择并不一致！导致函数的返回值形式不一样
+                ori_input = latents.detach().clone()
+                if use_sa_preserve and i in self.embedding:
+                    latents = (
+                            latents * (1.0 - guidance_mask)
+                            + torch.from_numpy(self.embedding[i]).to(latents.device) * guidance_mask
+                    ).half()
+                if sa_preserve:
+                    self.embedding[i] = ori_input.cpu().numpy()
 
                 # call the callback, if provided
-                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                if i == len(timesteps) - 1 or (
+                        (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
+                ):
                     progress_bar.update()
                     if callback is not None and i % callback_steps == 0:
-                        step_idx = i // getattr(self.scheduler, "order", 1)
-                        callback(step_idx, t, latents)
+                        callback(i, t, latents)
+                # 上面为migc的guidance部分
+                # if callback_on_step_end is not None:
+                #     callback_kwargs = {}
+                #     for k in callback_on_step_end_tensor_inputs:
+                #         callback_kwargs[k] = locals()[k]
+                #     callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
+                #
+                #     latents = callback_outputs.pop("latents", latents)
+                #     prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
+                #     negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
+                #
+                # # call the callback, if provided
+                # if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                #     progress_bar.update()
+                #     if callback is not None and i % callback_steps == 0:
+                #         step_idx = i // getattr(self.scheduler, "order", 1)
+                #         callback(step_idx, t, latents)
 
         # If we do sequential model offloading, let's offload unet and brushnet
         # manually for max memory savings
@@ -1277,3 +1366,23 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
             return (image, has_nsfw_concept)
 
         return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
+        # if output_type == "latent":
+        #     image = latents
+        # elif output_type == "pil":
+        #     # 8. Post-processing
+        #     image = self.decode_latents(latents)
+        #     image = self.numpy_to_pil(image)
+        # else:
+        #     # 8. Post-processing
+        #     image = self.decode_latents(latents)
+        #
+        # # Offload last model to CPU
+        # if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
+        #     self.final_offload_hook.offload()
+        #
+        # if not return_dict:
+        #     return (image, None)
+        #
+        # return StableDiffusionPipelineOutput(
+        #     images=image, nsfw_content_detected=None
+        # )
