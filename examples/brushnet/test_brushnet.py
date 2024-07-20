@@ -10,6 +10,7 @@ from PIL import Image
 from migc.migc_utils import seed_everything
 from migc.migc_pipeline import StableDiffusionMIGCPipeline, MIGCProcessor, AttentionStore
 from migc.migc_utils import load_migc
+from torchvision.ops import masks_to_boxes
 
 # choose the base model here
 # base_model_path = "data/ckpt/realisticVisionV60B1_v51VAE"
@@ -24,7 +25,7 @@ blended = False
 
 # input source image / mask image path and the text prompt
 image_path="src/test_image.jpg"
-mask_path="src/test_mask.jpg"
+# mask_path="src/mask_round.png"
 # caption="A cake on the table."
 # 原本的caption是str形式，这和migc的list[list[str]]差很多
 
@@ -55,20 +56,35 @@ pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config)
 pipe.enable_model_cpu_offload()
 
 init_image = cv2.imread(image_path)[:,:,::-1]
-mask_image = 1.*(cv2.imread(mask_path).sum(-1)>255)[:,:,np.newaxis]
+# mask_image = 1.*(cv2.imread(mask_path).sum(-1)>255)[:,:,np.newaxis]
+mask_path1 = 'src/mask_round1.png'
+mask_path2 = 'src/mask_round2.png'
+mask_image1 = 1.*(cv2.imread(mask_path1).sum(-1)>255)[:,:,np.newaxis]
+mask_image_t1 = torch.from_numpy(mask_image1).permute(2, 0, 1)
+mask_image2 = 1.*(cv2.imread(mask_path2).sum(-1)>255)[:,:,np.newaxis]
+mask_image_t2 = torch.from_numpy(mask_image2).permute(2, 0, 1)
+mask_image = mask_image1 + mask_image2
+
+# mask3.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/mask_round12.png', quality=100)
+boxes_xyxy = []
+boxes_xyxy.append(masks_to_boxes(mask_image_t1))
+boxes_xyxy.append(masks_to_boxes(mask_image_t2))
+# boxes_xyxy.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/mask2box.png', quality=100)
 init_image = init_image * (1-mask_image)
 # init_image = init_image * mask_image
 
 init_image = Image.fromarray(init_image.astype(np.uint8)).convert("RGB")
 mask_image = Image.fromarray(mask_image.astype(np.uint8).repeat(3,-1)*255).convert("RGB")
-
 init_image.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/init_image_T.png', quality=100)
-mask_image.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/mask_image.png', quality=100)
+mask_image.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/mask_round12.png', quality=100)
 generator = torch.Generator("cuda").manual_seed(1234)
 # 初始化migc需要的形参  # 需要把brushnet的prompt相关代码全部换成migc的
-prompt_final = [['masterpiece, best quality, red colored apple, purple colored ball, yellow colored banana, green colored watermelon',
-                 'red colored apple', 'purple colored ball', 'yellow colored banana', 'green colored watermelon']]  # 用migc的multi instances prompt才能实现多物体控制
-bboxes = [[[0.1, 0.1, 0.3, 0.3], [0.7, 0.1, 0.9, 0.3], [0.1, 0.7, 0.3, 0.9], [0.7, 0.7, 0.9, 0.9]]]
+# prompt_final = [['masterpiece, best quality, red colored apple, purple colored ball, yellow colored banana, green colored watermelon',
+#                  'red colored apple', 'purple colored ball', 'yellow colored banana', 'green colored watermelon']]  # 用migc的multi instances prompt才能实现多物体控制
+# bboxes = [[[0.1, 0.1, 0.3, 0.3], [0.7, 0.1, 0.9, 0.3], [0.1, 0.7, 0.3, 0.9], [0.7, 0.7, 0.9, 0.9]]]
+prompt_final = [['masterpiece, best quality, orange colored orange, yellow colored lemon',
+                 'orange colored orange', 'yellow colored lemon']]  # 用migc的multi instances prompt才能实现多物体控制
+bboxes = [[[0.2871, 0.1992, 0.4746, 0.373], [0.5742, 0.2558, 0.748, 0.42578]]]
 negative_prompt = 'worst quality, low quality, bad anatomy, watermark, text, blurry'
 image = pipe(
     prompt_final,
