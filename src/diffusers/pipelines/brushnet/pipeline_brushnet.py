@@ -1366,23 +1366,3 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
             return (image, has_nsfw_concept)
 
         return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
-        # if output_type == "latent":
-        #     image = latents
-        # elif output_type == "pil":
-        #     # 8. Post-processing
-        #     image = self.decode_latents(latents)
-        #     image = self.numpy_to_pil(image)
-        # else:
-        #     # 8. Post-processing
-        #     image = self.decode_latents(latents)
-        #
-        # # Offload last model to CPU
-        # if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
-        #     self.final_offload_hook.offload()
-        #
-        # if not return_dict:
-        #     return (image, None)
-        #
-        # return StableDiffusionPipelineOutput(
-        #     images=image, nsfw_content_detected=None
-        # )
