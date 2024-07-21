@@ -12,17 +12,18 @@ from migc.migc_pipeline import StableDiffusionMIGCPipeline, MIGCProcessor, Atten
 from migc.migc_utils import load_migc
 from torchvision.ops import masks_to_boxes
 
-
 def read_mask(mask_path):
     name = mask_path[4: -4]
+    kernel = np.ones((4, 4), np.uint8)
     mask_image = 1.*(cv2.imread(mask_path).sum(-1)>255)[:,:,np.newaxis]
+    dilated_mask_image = cv2.dilate(mask_image, kernel, iterations=1)[..., np.newaxis]
     mask_image_t = torch.from_numpy(mask_image).permute(2, 0, 1)
     box_xyxy = masks_to_boxes(mask_image_t)
-    return mask_image, box_xyxy, name
+    return mask_image, box_xyxy, name, dilated_mask_image
 
 # choose the base model here
-# base_model_path = "data/ckpt/realisticVisionV60B1_v51VAE"
-base_model_path = "runwayml/stable-diffusion-v1-5"
+base_model_path = "data/ckpt/realisticVisionV60B1_v51VAE"
+# base_model_path = "runwayml/stable-diffusion-v1-5"
 # base_model_path = "Uminosachi/realisticVisionV51_v51VAE-inpainting"
 # base_model_path = "CompVis/stable-diffusion-v1-4"  # 因为migc用的是sd1.4，和sd1.5的unet其实并不相同！
 # brushnet用sd1.4也能跑起来。试试migc能不能用sd1.5跑起来？=>答案是可以的。所以都用sd1.5跑吧
@@ -68,16 +69,21 @@ init_image = cv2.imread(image_path)[:,:,::-1]
 # mask_image = 1.*(cv2.imread(mask_path).sum(-1)>255)[:,:,np.newaxis]
 # mask_path1 = 'src/mask2.png' # [0.328125, 0.248, 0.457, 0.400], [0.535, 0.2539, 0.67578, 0.410]
 mask_path1 = 'src/mask_round1.png'  # [0.2871, 0.1992, 0.4746, 0.373]
+# mask_path1 = 'src/shineihuaping_mask.png'  # [0.8280, 0.5973, 0.9760, 0.8573]
 # mask_path2 = 'src/mask_cake.png'  # [0.5293, 0.3535, 0.734375, 0.47656]
-mask_path2 = 'src/mask_round2.png'  # [0.5742, 0.2558, 0.748, 0.42578]
+# mask_path2 = 'src/mask_round2.png'  # [0.5742, 0.2558, 0.748, 0.42578]
+mask_path2 = 'src/mask_round2_up.png'  # [0.5566, 0.2051, 0.7480, 0.3770]
 # mask_path3 = 'src/mask_box.png'  # [0.0625, 0.8223, 0.2734, 0.9531]
-mask_path3 = 'src/test_mask.jpg'  # [0.1523, 0.2559, 0.8496, 0.7402]
-mask_image1, box_xyxy1, name1 = read_mask(mask_path1)
-mask_image2, box_xyxy2, name2 = read_mask(mask_path2)
-mask_image3, box_xyxy3, name3 = read_mask(mask_path3)
-mask_image = mask_image1 + mask_image2 + mask_image3
+# mask_path3 = 'src/test_mask.jpg'  # [0.1523, 0.2559, 0.8496, 0.7402]
+mask_image1, box_xyxy1, name1, d_mask_image1 = read_mask(mask_path1)
+mask_image2, box_xyxy2, name2, d_mask_image2 = read_mask(mask_path2)
+# 定义膨胀kernel  # 上面的mask_image都是(512, 512, 1)，所以给dilated_mask_image添加一维之后就可以直接相加了
+# dilated_mask_image1 = Image.fromarray(dilated_mask_image1.astype(np.uint8).repeat(3,-1)*255).convert("RGB")
+# dilated_mask_image1.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/dilated_mask_round1.png', quality=100)
+# mask_image3, box_xyxy3, name3 = read_mask(mask_path3)
+mask_image = mask_image1 + mask_image2# + mask_image3
 mask_image[mask_image > 1.0] = 1.0  # 若mask有重叠，重叠区域相加会大于1，要把它们置为1
-name_t = name1 + name2 + name3
+name_t = name1 + name2# + name3
 name = 'output' + name_t + '.png'
 
 init_image = init_image * (1-mask_image)
@@ -92,10 +98,13 @@ generator = torch.Generator("cuda").manual_seed(1234)
 # prompt_final = [['masterpiece, best quality, red colored apple, purple colored ball, yellow colored banana, green colored watermelon',
 #                  'red colored apple', 'purple colored ball', 'yellow colored banana', 'green colored watermelon']]  # 用migc的multi instances prompt才能实现多物体控制
 # bboxes = [[[0.1, 0.1, 0.3, 0.3], [0.7, 0.1, 0.9, 0.3], [0.1, 0.7, 0.3, 0.9], [0.7, 0.7, 0.9, 0.9]]]
-prompt_final = [['masterpiece, best quality, orange colored orange, yellow colored lemon, white colored cake',
-                 'orange colored orange', 'yellow colored lemon', 'white colored cake']]  # 用migc的multi instances prompt才能实现多物体控制
-bboxes = [[[0.2871, 0.1992, 0.4746, 0.373], [0.5742, 0.2558, 0.748, 0.42578], [0.1523, 0.2559, 0.8496, 0.7402]]]
+# prompt_final = [['masterpiece, best quality, orange colored orange, yellow colored lemon',
+#                  'orange colored orange', 'yellow colored lemon']]  # 用migc的multi instances prompt才能实现多物体控制
+# bboxes = [[[0.2871, 0.1992, 0.4746, 0.373], [0.5742, 0.2558, 0.748, 0.42578]]]
 # bboxes = [[[0.2871, 0.1992, 0.4746, 0.373], [0.5293, 0.3535, 0.734375, 0.47656]]]
+prompt_final = [['masterpiece, best quality, yellow colored lemon, orange colored orange', 'yellow colored lemon',
+                 'orange colored orange']]
+bboxes = [[[0.2871, 0.1992, 0.4746, 0.373], [0.5566, 0.2051, 0.7480, 0.3770]]]
 negative_prompt = 'worst quality, low quality, bad anatomy, watermark, text, blurry'
 image = pipe(
     prompt_final,
