@@ -23,11 +23,12 @@ def read_mask(mask_path):
 # choose the base model here
 # base_model_path = "data/ckpt/realisticVisionV60B1_v51VAE"
 base_model_path = "runwayml/stable-diffusion-v1-5"
+# base_model_path = "Uminosachi/realisticVisionV51_v51VAE-inpainting"
 # base_model_path = "CompVis/stable-diffusion-v1-4"  # 因为migc用的是sd1.4，和sd1.5的unet其实并不相同！
 # brushnet用sd1.4也能跑起来。试试migc能不能用sd1.5跑起来？=>答案是可以的。所以都用sd1.5跑吧
 # input brushnet ckpt path
-brushnet_path = "data/ckpt/segmentation_mask_brushnet_ckpt"
-
+# brushnet_path = "data/ckpt/segmentation_mask_brushnet_ckpt"
+brushnet_path = "data/ckpt/random_mask_brushnet_ckpt"
 # choose whether using blended operation
 blended = False
 
@@ -65,14 +66,17 @@ pipe.enable_model_cpu_offload()
 
 init_image = cv2.imread(image_path)[:,:,::-1]
 # mask_image = 1.*(cv2.imread(mask_path).sum(-1)>255)[:,:,np.newaxis]
+# mask_path1 = 'src/mask2.png' # [0.328125, 0.248, 0.457, 0.400], [0.535, 0.2539, 0.67578, 0.410]
 mask_path1 = 'src/mask_round1.png'  # [0.2871, 0.1992, 0.4746, 0.373]
-mask_path2 = 'src/mask_cake.png'  # [0.5293, 0.3535, 0.734375, 0.47656]
-# mask_path2 = 'src/mask_round2.png'  # [0.5742, 0.2558, 0.748, 0.42578]
-mask_path3 = 'src/mask_box.png'  # [0.0625, 0.8223, 0.2734, 0.9531]
+# mask_path2 = 'src/mask_cake.png'  # [0.5293, 0.3535, 0.734375, 0.47656]
+mask_path2 = 'src/mask_round2.png'  # [0.5742, 0.2558, 0.748, 0.42578]
+# mask_path3 = 'src/mask_box.png'  # [0.0625, 0.8223, 0.2734, 0.9531]
+mask_path3 = 'src/test_mask.jpg'  # [0.1523, 0.2559, 0.8496, 0.7402]
 mask_image1, box_xyxy1, name1 = read_mask(mask_path1)
 mask_image2, box_xyxy2, name2 = read_mask(mask_path2)
 mask_image3, box_xyxy3, name3 = read_mask(mask_path3)
 mask_image = mask_image1 + mask_image2 + mask_image3
+mask_image[mask_image > 1.0] = 1.0  # 若mask有重叠，重叠区域相加会大于1，要把它们置为1
 name_t = name1 + name2 + name3
 name = 'output' + name_t + '.png'
 
@@ -81,16 +85,16 @@ init_image = init_image * (1-mask_image)
 
 init_image = Image.fromarray(init_image.astype(np.uint8)).convert("RGB")
 mask_image = Image.fromarray(mask_image.astype(np.uint8).repeat(3,-1)*255).convert("RGB")
-init_image.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/init_image_T.png', quality=100)
-mask_image.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/mask_rount_cake.png', quality=100)
+# init_image.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/init_image_T.png', quality=100)
+# mask_image.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/mask_rount_cake.png', quality=100)
 generator = torch.Generator("cuda").manual_seed(1234)
 # 初始化migc需要的形参  # 需要把brushnet的prompt相关代码全部换成migc的
 # prompt_final = [['masterpiece, best quality, red colored apple, purple colored ball, yellow colored banana, green colored watermelon',
 #                  'red colored apple', 'purple colored ball', 'yellow colored banana', 'green colored watermelon']]  # 用migc的multi instances prompt才能实现多物体控制
 # bboxes = [[[0.1, 0.1, 0.3, 0.3], [0.7, 0.1, 0.9, 0.3], [0.1, 0.7, 0.3, 0.9], [0.7, 0.7, 0.9, 0.9]]]
-prompt_final = [['masterpiece, best quality, orange colored orange, yellow colored cake, white colored cake',
-                 'orange colored orange', 'yellow colored cake', 'white colored cake']]  # 用migc的multi instances prompt才能实现多物体控制
-bboxes = [[[0.2871, 0.1992, 0.4746, 0.373], [0.5293, 0.3535, 0.734375, 0.47656], [0.0625, 0.8223, 0.2734, 0.9531]]]
+prompt_final = [['masterpiece, best quality, orange colored orange, yellow colored lemon, white colored cake',
+                 'orange colored orange', 'yellow colored lemon', 'white colored cake']]  # 用migc的multi instances prompt才能实现多物体控制
+bboxes = [[[0.2871, 0.1992, 0.4746, 0.373], [0.5742, 0.2558, 0.748, 0.42578], [0.1523, 0.2559, 0.8496, 0.7402]]]
 # bboxes = [[[0.2871, 0.1992, 0.4746, 0.373], [0.5293, 0.3535, 0.734375, 0.47656]]]
 negative_prompt = 'worst quality, low quality, bad anatomy, watermark, text, blurry'
 image = pipe(
