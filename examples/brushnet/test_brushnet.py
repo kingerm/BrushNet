@@ -71,8 +71,8 @@ init_image = cv2.imread(image_path)[:,:,::-1]
 mask_path1 = 'src/mask_round1.png'  # [0.2871, 0.1992, 0.4746, 0.373]
 # mask_path1 = 'src/shineihuaping_mask.png'  # [0.8280, 0.5973, 0.9760, 0.8573]
 # mask_path2 = 'src/mask_cake.png'  # [0.5293, 0.3535, 0.734375, 0.47656]
-# mask_path2 = 'src/mask_round2.png'  # [0.5742, 0.2558, 0.748, 0.42578]
-mask_path2 = 'src/mask_round2_up.png'  # [0.5566, 0.2051, 0.7480, 0.3770]
+mask_path2 = 'src/mask_round2.png'  # [0.5742, 0.2558, 0.748, 0.42578]
+# mask_path2 = 'src/mask_round2_up.png'  # [0.5566, 0.2051, 0.7480, 0.3770]
 # mask_path3 = 'src/mask_box.png'  # [0.0625, 0.8223, 0.2734, 0.9531]
 # mask_path3 = 'src/test_mask.jpg'  # [0.1523, 0.2559, 0.8496, 0.7402]
 mask_image1, box_xyxy1, name1, d_mask_image1 = read_mask(mask_path1)
@@ -102,9 +102,9 @@ generator = torch.Generator("cuda").manual_seed(1234)
 #                  'orange colored orange', 'yellow colored lemon']]  # 用migc的multi instances prompt才能实现多物体控制
 # bboxes = [[[0.2871, 0.1992, 0.4746, 0.373], [0.5742, 0.2558, 0.748, 0.42578]]]
 # bboxes = [[[0.2871, 0.1992, 0.4746, 0.373], [0.5293, 0.3535, 0.734375, 0.47656]]]
-prompt_final = [['masterpiece, best quality, yellow colored lemon, orange colored orange', 'yellow colored lemon',
+prompt_final = [['masterpiece, best quality, orange colored orange, orange colored orange', 'orange colored orange',
                  'orange colored orange']]
-bboxes = [[[0.2871, 0.1992, 0.4746, 0.373], [0.5566, 0.2051, 0.7480, 0.3770]]]
+bboxes = [[[0.2871, 0.1992, 0.4746, 0.373], [0.5742, 0.2558, 0.748, 0.42578]]]
 negative_prompt = 'worst quality, low quality, bad anatomy, watermark, text, blurry'
 image = pipe(
     prompt_final,
@@ -118,7 +118,9 @@ image = pipe(
     MIGCsteps=25,
     NaiveFuserSteps=50,
     aug_phase_with_and=False,
-    negative_prompt=negative_prompt
+    negative_prompt=negative_prompt,
+    sa_preserve=True,  # sa_preserve和use_sa_preserve开启consistent-mig算法
+    use_sa_preserve=True
 ).images[0]
 
 if blended:

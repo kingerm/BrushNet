@@ -824,7 +824,7 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
 
     @torch.no_grad()
     @replace_example_docstring(EXAMPLE_DOC_STRING)
-    @autocast(True)
+    @autocast(True)  # 采用混合精度，不然brushnet的float16和migc的float32无法一起计算
     def __call__(
         self,
         prompt: Union[str, List[str]] = None,
@@ -1281,7 +1281,7 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
                     t,
                     encoder_hidden_states=prompt_embeds,
                     timestep_cond=timestep_cond,
-                    cross_attention_kwargs=cross_attention_kwargs,
+                    cross_attention_kwargs=cross_attention_kwargs,  # 这里本来是self.cross_attention_kwargs，为None。说明brushnet和ca没啥关系
                     down_block_add_samples=down_block_res_samples,
                     mid_block_add_sample=mid_block_res_sample,
                     up_block_add_samples=up_block_res_samples,
@@ -1290,24 +1290,27 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
                 )[0]
 
                 # perform guidance
-                if self.do_classifier_free_guidance:
+                if self.do_classifier_free_guidance:  # 这是做cfg
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
 
                 # 这里下去就很不一样了，先调试前面部分
                 # compute the previous noisy sample x_t -> x_t-1
                 # latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+                #
                 step_output = self.scheduler.step(
                     noise_pred, t, latents, **extra_step_kwargs
                 )
                 latents = step_output.prev_sample
                 # self.scheduler.step和migc不一样的原因是Scheduler的选择并不一致！导致函数的返回值形式不一样
+                # 下面这个ori_input是z_t,cur的复制，保存下来作为下一轮的z_t,prev
                 ori_input = latents.detach().clone()
-                if use_sa_preserve and i in self.embedding:
+                if use_sa_preserve and i in self.embedding:  # 把use_sa_preserve和sa_preserve均设为True以开启consistent-mig算法
                     latents = (
                             latents * (1.0 - guidance_mask)
                             + torch.from_numpy(self.embedding[i]).to(latents.device) * guidance_mask
-                    ).half()
+                    ).half()  # float改成half
+                    # 这段代码对应着migc++中的公式(12)。guidance_mask就是m_modified，self.embedding[i]即z_t,prev
                 if sa_preserve:
                     self.embedding[i] = ori_input.cpu().numpy()
 
