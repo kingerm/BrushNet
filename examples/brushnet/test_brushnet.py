@@ -11,15 +11,57 @@ from migc.migc_utils import seed_everything
 from migc.migc_pipeline import StableDiffusionMIGCPipeline, MIGCProcessor, AttentionStore
 from migc.migc_utils import load_migc
 from torchvision.ops import masks_to_boxes
+import math
 
 def read_mask(mask_path):
     name = mask_path[4: -4]
-    kernel = np.ones((4, 4), np.uint8)
+    kernel = np.ones((4, 4), np.uint8)  # dilate核
     mask_image = 1.*(cv2.imread(mask_path).sum(-1)>255)[:,:,np.newaxis]
     dilated_mask_image = cv2.dilate(mask_image, kernel, iterations=1)[..., np.newaxis]
     mask_image_t = torch.from_numpy(mask_image).permute(2, 0, 1)
     box_xyxy = masks_to_boxes(mask_image_t)
-    return mask_image, box_xyxy, name, dilated_mask_image
+    h, w, _ = mask_image.shape
+    box_xyxy = box_xyxy.squeeze(0)
+    box_xyxy[0], box_xyxy[2] = box_xyxy[0] / w, box_xyxy[2] / w
+    box_xyxy[1], box_xyxy[3] = box_xyxy[1] / h, box_xyxy[3] / h
+    return mask_image, box_xyxy.numpy().tolist(), name, dilated_mask_image
+def cal_hw(h, w):
+    ref_aspect_ratio = h / w  # 定义参考的高宽比，目的是使变形后的size的高宽比尽可能接近原来的高宽比
+    # 考虑到这样一个事实：对于正整数a而言，其相邻的两个32的倍数必然是一个除64余0， 一个除64余32.
+    # 对于a/b而言，较小的一方在改变相同值时，会对比例产生更大的影响。所以应该尽可能地让较小的一方改变较少的值。
+    dec_h, dec_w = (h % 32) / 32, (w % 32) / 32  # 计算h, w除以32的小数部分
+    if h < w:
+        int_h = h // 32 if dec_h < 0.5 else (h // 32) + 1
+        h_new = int_h * 32
+        tmp = (h_new % 64) / 64
+        if tmp == 0.5:
+            w_new = w // 64 * 64 + 32
+        elif tmp == 0.0:
+            w_new1 = w // 64 * 64
+            w_new2 = w_new1 + 64
+            asp1 = h_new / w_new1
+            asp2 = h_new / w_new2
+            if abs(asp1 - ref_aspect_ratio) < abs(asp2 - ref_aspect_ratio):
+                w_new = w_new1
+            else:
+                w_new = w_new2
+    else:
+        int_w = w // 32 if dec_w < 0.5 else (w // 32) + 1
+        w_new = int_w * 32
+        tmp = (w_new % 64) / 64
+        if tmp == 0.5:
+            h_new = h // 64 * 64 + 32
+        elif tmp == 0.0:
+            h_new1 = h // 64 * 64
+            h_new2 = h_new1 + 64
+            asp1 = h_new1 / w_new
+            asp2 = h_new2 / w_new
+            if abs(asp1 - ref_aspect_ratio) < abs(asp2 - ref_aspect_ratio):
+                h_new = h_new1
+            else:
+                h_new = h_new2
+    return int(h_new), int(w_new)
+
 
 # choose the base model here
 base_model_path = "data/ckpt/realisticVisionV60B1_v51VAE"
@@ -34,7 +76,7 @@ brushnet_path = "data/ckpt/random_mask_brushnet_ckpt"
 blended = False
 
 # input source image / mask image path and the text prompt
-image_path="src/test_image.jpg"
+
 # mask_path="src/mask_round.png"
 # caption="A cake on the table."
 # 原本的caption是str形式，这和migc的list[list[str]]差很多
@@ -65,47 +107,48 @@ pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config)
 # memory optimization.
 pipe.enable_model_cpu_offload()
 
+image_path="src/test_image.jpg"
 init_image = cv2.imread(image_path)[:,:,::-1]
 # mask_image = 1.*(cv2.imread(mask_path).sum(-1)>255)[:,:,np.newaxis]
-# mask_path1 = 'src/mask2.png' # [0.328125, 0.248, 0.457, 0.400], [0.535, 0.2539, 0.67578, 0.410]
-mask_path1 = 'src/mask_round1.png'  # [0.2871, 0.1992, 0.4746, 0.373]
-# mask_path1 = 'src/shineihuaping_mask.png'  # [0.8280, 0.5973, 0.9760, 0.8573]
-# mask_path2 = 'src/mask_cake.png'  # [0.5293, 0.3535, 0.734375, 0.47656]
-mask_path2 = 'src/mask_round2.png'  # [0.5742, 0.2558, 0.748, 0.42578]
-# mask_path2 = 'src/mask_round2_up.png'  # [0.5566, 0.2051, 0.7480, 0.3770]
-# mask_path3 = 'src/mask_box.png'  # [0.0625, 0.8223, 0.2734, 0.9531]
-# mask_path3 = 'src/test_mask.jpg'  # [0.1523, 0.2559, 0.8496, 0.7402]
+mask_path1 = 'src/mask_round1.png'
+mask_path2 = 'src/mask_round2.png'
+# mask_path3 = 'src/renlian3_necklace.jpg'
+# mask_path2 = 'src/sofa_mask2.jpg'
 mask_image1, box_xyxy1, name1, d_mask_image1 = read_mask(mask_path1)
 mask_image2, box_xyxy2, name2, d_mask_image2 = read_mask(mask_path2)
+# mask_image3, box_xyxy3, name3, d_mask_image3 = read_mask(mask_path3)
 # 定义膨胀kernel  # 上面的mask_image都是(512, 512, 1)，所以给dilated_mask_image添加一维之后就可以直接相加了
 # dilated_mask_image1 = Image.fromarray(dilated_mask_image1.astype(np.uint8).repeat(3,-1)*255).convert("RGB")
 # dilated_mask_image1.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/dilated_mask_round1.png', quality=100)
 # mask_image3, box_xyxy3, name3 = read_mask(mask_path3)
-mask_image = mask_image1 + mask_image2# + mask_image3
+mask_image_wo_d = mask_image1 + mask_image2
+mask_image = d_mask_image1 + d_mask_image2
 mask_image[mask_image > 1.0] = 1.0  # 若mask有重叠，重叠区域相加会大于1，要把它们置为1
-name_t = name1 + name2# + name3
+mask = mask_image  # 这里把mask_image给保存下来，方便后面画图
+mask_wo_d = mask_image_wo_d
+name_t =  name1 + name2
 name = 'output' + name_t + '.png'
+
+
 
 init_image = init_image * (1-mask_image)
 # init_image = init_image * mask_image
-
+h, w, _ = init_image.shape
+h, w = cal_hw(h, w)
 init_image = Image.fromarray(init_image.astype(np.uint8)).convert("RGB")
 mask_image = Image.fromarray(mask_image.astype(np.uint8).repeat(3,-1)*255).convert("RGB")
 # init_image.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/init_image_T.png', quality=100)
 # mask_image.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/mask_rount_cake.png', quality=100)
 generator = torch.Generator("cuda").manual_seed(1234)
 # 初始化migc需要的形参  # 需要把brushnet的prompt相关代码全部换成migc的
-# prompt_final = [['masterpiece, best quality, red colored apple, purple colored ball, yellow colored banana, green colored watermelon',
-#                  'red colored apple', 'purple colored ball', 'yellow colored banana', 'green colored watermelon']]  # 用migc的multi instances prompt才能实现多物体控制
-# bboxes = [[[0.1, 0.1, 0.3, 0.3], [0.7, 0.1, 0.9, 0.3], [0.1, 0.7, 0.3, 0.9], [0.7, 0.7, 0.9, 0.9]]]
 # prompt_final = [['masterpiece, best quality, orange colored orange, yellow colored lemon',
 #                  'orange colored orange', 'yellow colored lemon']]  # 用migc的multi instances prompt才能实现多物体控制
-# bboxes = [[[0.2871, 0.1992, 0.4746, 0.373], [0.5742, 0.2558, 0.748, 0.42578]]]
-# bboxes = [[[0.2871, 0.1992, 0.4746, 0.373], [0.5293, 0.3535, 0.734375, 0.47656]]]
-prompt_final = [['masterpiece, best quality, orange colored orange, orange colored orange', 'orange colored orange',
-                 'orange colored orange']]
-bboxes = [[[0.2871, 0.1992, 0.4746, 0.373], [0.5742, 0.2558, 0.748, 0.42578]]]
+prompt_final = [['masterpiece, best quality, orange colored orange, yellow colored lemon',
+                 'orange colored orange', 'yellow colored lemon'
+                 ]]
+bboxes = [[box_xyxy1, box_xyxy2]]  # 优化了代码，使其不再需要手动计算bboxes，更加智能！
 negative_prompt = 'worst quality, low quality, bad anatomy, watermark, text, blurry'
+
 image = pipe(
     prompt_final,
     init_image, 
@@ -120,7 +163,9 @@ image = pipe(
     aug_phase_with_and=False,
     negative_prompt=negative_prompt,
     sa_preserve=True,  # sa_preserve和use_sa_preserve开启consistent-mig算法
-    use_sa_preserve=True
+    use_sa_preserve=True,
+    height=512,  # 这里的h w是否应该为16或者32的倍数？仅是8的倍数是不够的
+    width=512   # 和预想的一样，仅为16的倍数也不够。要为32的倍数，且除以64的余数均同时为0或32才行=>不对，最好全为64的倍数
 ).images[0]
 
 if blended:
@@ -137,5 +182,10 @@ if blended:
     image_pasted=image_pasted.astype(image_np.dtype)
     image=Image.fromarray(image_pasted)
 
-
 image.save(name)
+image = pipe.draw_box_desc(image, bboxes[0], prompt_final[0][1:])
+mask_img = pipe.draw_mask(image, mask)
+mask_img = pipe.draw_mask(mask_img, mask_wo_d)
+mask_img = Image.fromarray(mask_img.astype(np.uint8)).convert('RGB')
+image.save('anno_output.png')
+mask_img.save('anno_mask.png')

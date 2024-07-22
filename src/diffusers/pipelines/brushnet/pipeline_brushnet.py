@@ -31,7 +31,9 @@ from ..stable_diffusion import StableDiffusionPipeline
 # from migc.migc_arch import MIGC, NaiveFuser
 from scipy.ndimage import uniform_filter, gaussian_filter
 from torch.cuda.amp import autocast as autocast
-
+import os
+from PIL import Image, ImageDraw, ImageFont
+import cv2
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
@@ -228,6 +230,46 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
         self.register_to_config(requires_safety_checker=requires_safety_checker)
         self.instance_set = set()
         self.embedding = {}
+
+    @staticmethod
+    def draw_box_desc(pil_img: Image, bboxes: List[List[float]], prompt: List[str]) -> Image:
+        """Utility function to draw bbox on the image"""
+        color_list = ['red', 'blue', 'yellow', 'purple', 'green', 'black', 'brown', 'orange', 'white', 'gray']
+        width, height = pil_img.size
+        draw = ImageDraw.Draw(pil_img)
+        font_folder = os.path.dirname(os.path.dirname(__file__))
+        font_path = os.path.join(font_folder, 'Rainbow-Party-2.ttf')
+        font = ImageFont.truetype(font_path, 30)
+
+        for box_id in range(len(bboxes)):
+            obj_box = bboxes[box_id]
+            text = prompt[box_id]
+            fill = 'black'  # the black box represents that the instance does not have a specified color.
+            for color in prompt[box_id].split(' '):
+                if color in color_list:
+                    fill = color
+            text = text.split(',')[0]
+            x_min, y_min, x_max, y_max = (
+                obj_box[0] * width,
+                obj_box[1] * height,
+                obj_box[2] * width,
+                obj_box[3] * height,
+            )
+            draw.rectangle(
+                [int(x_min), int(y_min), int(x_max), int(y_max)],
+                outline=fill,
+                width=4,
+            )
+            draw.text((int(x_min), int(y_min)), text, fill=fill, font=font)
+
+        return pil_img
+    @staticmethod
+    def draw_mask(img, mask):  # 把mask轮廓画在原图像上
+        img = np.array(img)
+        ret, thresh = cv2.threshold(mask.astype(np.uint8), 0.5, 255, 0)  # 黑底白mask
+        contours, im = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)  # 描边
+        imgg = cv2.drawContours(img, contours=contours, contourIdx=-1, color=(0, 0, 0), thickness=1)
+        return imgg
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline._encode_prompt
     def _encode_prompt(  # 这里比migc多一个lora_scale，不知道是干啥的？

@@ -241,9 +241,9 @@ class MIGCProcessor(nn.Module):  # 这看起来就像是migc的net！得好好�
                                             guidance_masks,
                                             other_info=other_info,
                                             return_fuser_info=True)
-        else:
+        else:  # 如果不使用migc，那么就和paper中说的一样用global prompt来控制
             hidden_states_cond, fuser_info = self.naive_fuser(cond_ca_output,
-                                            guidance_masks,
+                                            guidance_masks,  # 其h, w为input image的size // 8
                                             other_info=other_info,
                                             return_fuser_info=True)
         hidden_states_cond = hidden_states_cond.squeeze(1)

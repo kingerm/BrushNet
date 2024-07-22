@@ -205,7 +205,7 @@ class NaiveFuser(nn.Module):
         # image_token: (B, instance_num+1, HW, C)
         full_H = other_info['height']
         full_W = other_info['width']
-        B, _, HW, C = ca_x.shape
+        B, _, HW, C = ca_x.shape  # hw = guidance_mask的 h * w
         instance_num = guidance_mask.shape[1]
         down_scale = int(math.sqrt(full_H * full_W // ca_x.shape[2]))
         H = full_H // down_scale
