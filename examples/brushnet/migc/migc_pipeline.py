@@ -120,7 +120,7 @@ class MIGCProcessor(nn.Module):  # 这看起来就像是migc的net！得好好�
             attention_mask, sequence_length, batch_size
         )
         
-        instance_num = len(bboxes[0])  #
+        instance_num = len(bboxes[0])
 
         if ith > MIGCsteps:
             not_use_migc = True
@@ -204,7 +204,7 @@ class MIGCProcessor(nn.Module):  # 这看起来就像是migc的net！得好好�
             h_min = int(height * bbox[1])
             h_max = int(height * bbox[3])
             guidance_mask[h_min: h_max, w_min: w_max] = 1.0
-            guidance_masks.append(guidance_mask[None, ...])
+            guidance_masks.append(guidance_mask[None, ...])  # guidance_mask有点硬了，确实得软一点
             in_box.append([bbox[0], bbox[2], bbox[1], bbox[3]])
         
         # Construct Background Guidance Mask
