@@ -1166,7 +1166,6 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
             height, width = image.shape[-2:]
         else:
             assert False
-
         # 5. Prepare timesteps  # timesteps是float32，得改成float16
         timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
         timesteps = timesteps.half()
@@ -1174,8 +1173,8 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
 
         # 6. Prepare latent variables
         num_channels_latents = self.unet.config.in_channels
-        latents, noise = self.prepare_latents(  # latents在这里被初始化，之前都是None。所以要进去修改源头才行
-            batch_size * num_images_per_prompt,
+        latents, noise = self.prepare_latents(   # latents在这里被初始化，之前都是None。所以要进去修改源头才行
+            batch_size * num_images_per_prompt,  # latents初始化为一个随机高斯噪声，没什么用
             num_channels_latents,
             height,
             width,
@@ -1187,14 +1186,15 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
 
         # 6.1 prepare condition latents
         conditioning_latents=self.vae.encode(image).latent_dist.sample() * self.vae.config.scaling_factor
+        # latents初始化为原始图片的latents
         mask = torch.nn.functional.interpolate(
-                    original_mask, 
+                    original_mask,
                     size=(
-                        conditioning_latents.shape[-2], 
+                        conditioning_latents.shape[-2],
                         conditioning_latents.shape[-1]
                     )
                 )
-        conditioning_latents = torch.concat([conditioning_latents,mask],1)
+        conditioning_latents = torch.concat([conditioning_latents,mask],1)  # conditioning_latents: (2, 5, 94, 64)
         # conditioning_latents, mask都是float16
         # 6.5 Optionally get Guidance Scale Embedding
         timestep_cond = None
@@ -1246,7 +1246,7 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
             guidance_mask[:, h_min:h_max, w_min:w_max] = 0
 
         kernal_size = 5
-        guidance_mask = uniform_filter(
+        guidance_mask = uniform_filter(  # 这一段看不太懂什么意思，但目的是做consistent_mig，生成m_modify
             guidance_mask, axes=(1, 2), size=kernal_size
         )
         # guidance_mask是float64，也需要转为float16
@@ -1330,7 +1330,6 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
                     added_cond_kwargs=added_cond_kwargs,
                     return_dict=False,
                 )[0]
-
                 # perform guidance
                 if self.do_classifier_free_guidance:  # 这是做cfg
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
@@ -1346,11 +1345,13 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
                 latents = step_output.prev_sample
                 # self.scheduler.step和migc不一样的原因是Scheduler的选择并不一致！导致函数的返回值形式不一样
                 # 下面这个ori_input是z_t,cur的复制，保存下来作为下一轮的z_t,prev
+                # 这段代码的意思是保存上一次生成时的状态，然后把背景部分直接替换为上一次生成的！
+                # self.embedding记录了每一轮的latents，总共有50个。具体形式为一个dict,为：0: latent1, 1: latent2, ...
                 ori_input = latents.detach().clone()
                 if use_sa_preserve and i in self.embedding:  # 把use_sa_preserve和sa_preserve均设为True以开启consistent-mig算法
                     latents = (
-                            latents * (1.0 - guidance_mask)
-                            + torch.from_numpy(self.embedding[i]).to(latents.device) * guidance_mask
+                            latents * (1.0 - guidance_mask.to(latents.device))
+                            + torch.from_numpy(self.embedding[i]).to(latents.device) * guidance_mask.to(latents.device)
                     ).half()  # float改成half
                     # 这段代码对应着migc++中的公式(12)。guidance_mask就是m_modified，self.embedding[i]即z_t,prev
                 if sa_preserve:
@@ -1364,50 +1365,35 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
                     if callback is not None and i % callback_steps == 0:
                         callback(i, t, latents)
                 # 上面为migc的guidance部分
-                # if callback_on_step_end is not None:
-                #     callback_kwargs = {}
-                #     for k in callback_on_step_end_tensor_inputs:
-                #         callback_kwargs[k] = locals()[k]
-                #     callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
-                #
-                #     latents = callback_outputs.pop("latents", latents)
-                #     prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-                #     negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
-                #
-                # # call the callback, if provided
-                # if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
-                #     progress_bar.update()
-                #     if callback is not None and i % callback_steps == 0:
-                #         step_idx = i // getattr(self.scheduler, "order", 1)
-                #         callback(step_idx, t, latents)
 
         # If we do sequential model offloading, let's offload unet and brushnet
-        # manually for max memory savings
-        if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
-            self.unet.to("cpu")
-            self.brushnet.to("cpu")
-            torch.cuda.empty_cache()
+            # manually for max memory savings
+            if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
+                self.unet.to("cpu")
+                self.brushnet.to("cpu")
+                torch.cuda.empty_cache()
 
-        if not output_type == "latent":
-            image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False, generator=generator)[
-                0
-            ]
-            image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
-        else:
-            image = latents
-            has_nsfw_concept = None
+            if not output_type == "latent":
+                image = \
+                self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False, generator=generator)[
+                    0
+                ]
+                image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
+            else:
+                image = latents
+                has_nsfw_concept = None
 
-        if has_nsfw_concept is None:
-            do_denormalize = [True] * image.shape[0]
-        else:
-            do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
+            if has_nsfw_concept is None:
+                do_denormalize = [True] * image.shape[0]
+            else:
+                do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
 
-        image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
+            image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
 
-        # Offload all models
-        self.maybe_free_model_hooks()
+            # Offload all models
+            self.maybe_free_model_hooks()
 
-        if not return_dict:
-            return (image, has_nsfw_concept)
+            if not return_dict:
+                return (image, has_nsfw_concept)
 
-        return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
+            return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)

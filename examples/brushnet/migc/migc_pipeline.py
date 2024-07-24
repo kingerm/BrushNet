@@ -81,7 +81,7 @@ def get_sup_mask(mask_list):
     return sup_mask
 
 
-class MIGCProcessor(nn.Module):  # 这看起来就像是migc的net！得好好研究一下
+class MIGCProcessor(nn.Module):  # 这看起来就像是migc的net！得好好研究一下  # 这是嵌入在unet里面的attention processor
     def __init__(self, config, attnstore, place_in_unet):
         super().__init__()
         self.attnstore = attnstore
@@ -90,7 +90,7 @@ class MIGCProcessor(nn.Module):  # 这看起来就像是migc的net！得好好�
         self.naive_fuser = NaiveFuser()        
         self.embedding = {}
         if not self.not_use_migc:
-            self.migc = MIGC(config['C'])
+            self.migc = MIGC(config['C'])  # 这里是进入migc_arch的MIGC类中进行初始化
 
     def __call__(
             self,
@@ -113,7 +113,7 @@ class MIGCProcessor(nn.Module):  # 这看起来就像是migc的net！得好好�
             use_sa_preserve=False,
             sa_preserve=False,
     ):
-        batch_size, sequence_length, _ = hidden_states.shape
+        batch_size, sequence_length, _ = hidden_states.shape  # sequence_length = H * W
         assert(batch_size == 2, "We currently only implement sampling with batch_size=1, \
                and we will implement sampling with batch_size=N as soon as possible.")
         attention_mask = attn.prepare_attention_mask(
@@ -131,7 +131,7 @@ class MIGCProcessor(nn.Module):  # 这看起来就像是migc的net！得好好�
             is_vanilla_cross = True
 
         is_cross = encoder_hidden_states is not None
-        
+        # 存下SA的K V，目前的ori_hidden_state为(2, HW, 320)
         ori_hidden_states = hidden_states.clone()
 
         # Only Need Negative Prompt and Global Prompt.
@@ -146,14 +146,14 @@ class MIGCProcessor(nn.Module):  # 这看起来就像是migc的net！得好好�
             hidden_states = torch.cat([hidden_states_uncond, hidden_states_cond])
 
         # QKV Operation of Vanilla Self-Attention or Cross-Attention
-        query = attn.to_q(hidden_states)
+        query = attn.to_q(hidden_states)  # query此处为(2, HW, 320)
         
         if (
             not is_cross
             and use_sa_preserve
             and timestep.item() in self.embedding
             and self.place_in_unet == "up"
-        ):
+        ):  # 这里是把unet的K和V concat起来，对应paper中的第7页的红字部分
             hidden_states = torch.cat((hidden_states, torch.from_numpy(self.embedding[timestep.item()]).to(hidden_states.device)), dim=1)
 
         if not is_cross and sa_preserve and self.place_in_unet == "up":

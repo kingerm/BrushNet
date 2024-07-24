@@ -98,10 +98,10 @@ def load_migc(unet, attention_store, pretrained_MIGC_path: Union[str, Dict[str, 
         elif key_final.startswith("down_blocks"):
             place_in_unet = "down"
 
-        attn_processors[key_final] = attn_processor(config, attention_store, place_in_unet)
+        attn_processors[key_final] = attn_processor(config, attention_store, place_in_unet)  # 这只是在初始化MIGCProcessor!走的是init函数
         attn_processors[key_final].load_state_dict(value_dict)
         attn_processors[key_final].to(device=unet.device, dtype=unet.dtype)
-
+    # 只在mid_block和up_blocks.1上面加载了migc
     # Create CrossAttention/SelfAttention Processor
     config = {'not_use_migc': True}
     for key in all_processor_keys:
