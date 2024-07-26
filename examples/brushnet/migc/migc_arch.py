@@ -211,9 +211,7 @@ class NaiveFuser(nn.Module):
         down_scale = int(math.sqrt(full_H * full_W // ca_x.shape[2]))
         H = full_H // down_scale
         W = full_W // down_scale
-        # 把mask插值变小以匹配attention的尺寸
         guidance_mask = F.interpolate(guidance_mask, size=(H, W), mode='bilinear')   # (B, instance_num, H, W)
-        # 全1的mask即为layout attention的mask
         guidance_mask = torch.cat([torch.ones(B, 1, H, W).to(guidance_mask.device), guidance_mask * 10], dim=1)  # (B, instance_num+1, H, W)
         guidance_mask = guidance_mask.view(B, instance_num + 1, HW, 1)
         out_MIGC = (ca_x * guidance_mask).sum(dim=1) / (guidance_mask.sum(dim=1) + 1e-6)

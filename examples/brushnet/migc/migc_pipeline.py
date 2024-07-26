@@ -167,11 +167,11 @@ class MIGCProcessor(nn.Module):  # 这看起来就像是migc的net！得好好�
         use_ba = False
         if ith >= BaSteps:
             use_ba = True
-        if ith >= MIGCsteps:  # migcsteps为25，当处于inference后半段时，不使用migc  # 25的时候还在用migc，有点怪。因为是0-49，所以25不应该用了
+        if ith > MIGCsteps:
             not_use_migc = True
         else:
             not_use_migc = self.not_use_migc
-        is_vanilla_cross = (not_use_migc and ith > NaiveFuserSteps)  # 如果把这个拉满，那么就不会再有vanilla cross，相当于后半段inference全程作用naivefuser
+        is_vanilla_cross = (not_use_migc and ith > NaiveFuserSteps)
         if instance_num == 0:
             is_vanilla_cross = True
 
@@ -248,7 +248,7 @@ class MIGCProcessor(nn.Module):  # 这看起来就像是migc的net！得好好�
             return hidden_states  # 从这里返回了
 
         ###### Vanilla Cross-Attention Results ######
-        if is_vanilla_cross:  # 如果naivefusersteps拉满，必然不会在这里return，一定会经过下面的self.migc或者self.naivefuser
+        if is_vanilla_cross:
             return hidden_states
 
 
@@ -272,7 +272,7 @@ class MIGCProcessor(nn.Module):  # 这看起来就像是migc的net！得好好�
             guidance_mask[h_min: h_max, w_min: w_max] = 1.0
             guidance_masks.append(guidance_mask[None, ...])  # guidance_mask有点硬了，确实得软一点
             in_box.append([bbox[0], bbox[2], bbox[1], bbox[3]])
-        # 方方正正的guidance mask，参考be yourself的方法进行聚类会不会好一点呢？
+        
         # Construct Background Guidance Mask
         sup_mask = get_sup_mask(guidance_masks)
         supplement_mask = torch.from_numpy(sup_mask[None, ...])
