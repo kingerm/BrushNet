@@ -140,7 +140,7 @@ class MIGCProcessor(nn.Module):  # 这看起来就像是migc的net！得好好�
             hidden_states,
             encoder_hidden_states=None,
             attention_mask=None,
-            prompt_nums=[],
+            prompt_nums=[],  # 这里之后都是cross_attention_kwargs带来的参数。
             bboxes=[],  # bboxes是啥？应该是xyxy或者其embedding
             ith=None,
             embeds_pooler=None,
