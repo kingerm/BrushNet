@@ -11,10 +11,8 @@ from diffusers import EulerDiscreteScheduler
 if is_accelerate_available():
     from accelerate import init_empty_weights
 from contextlib import nullcontext
-from functools import reduce
 
-def get_nested_value(obj, path):
-    return reduce(lambda d, key: getattr(d, key), path, obj)
+
 def seed_everything(seed):
     # np.random.seed(seed)
     torch.manual_seed(seed)
@@ -59,12 +57,8 @@ def load_migc(unet, attention_store, pretrained_MIGC_path: Union[str, Dict[str, 
 
 
     adapter_grouped_dict = defaultdict(dict)
-    # for net_name, net in unet.named_children():
-    #     if "down" in net_name:
-    #         for name, subnet in net.named_children():
-    #             if net.__class__.__name__ == 'Attention':
-    #                 print(net.scale)
-    # change the key of MIGC.ckpt as the form of diffusers unet 
+
+    # change the key of MIGC.ckpt as the form of diffusers unet
     for key, value in state_dict.items():
         key_list = key.split(".")
         assert 'migc' in key_list
@@ -91,24 +85,20 @@ def load_migc(unet, attention_store, pretrained_MIGC_path: Union[str, Dict[str, 
         sub_key = '.'.join(key_list[key_list.index('migc'):])
         adapter_grouped_dict[attn_processor_key][sub_key] = value
 
-    # 把MIGC的权重名改为与unet一致后，改如何将其注入呢？
     # Create MIGC Processor
     config = {'not_use_migc': False}
     for key, value_dict in adapter_grouped_dict.items():
         dim = value_dict['migc.norm.bias'].shape[0]
         config['C'] = dim
         key_final = key + '.attn2.processor'
-        list_ba = (key + '.attn2.scale').split('.')  # ['mid_block', 'attentions', '0', 'transformer_blocks', '0', 'attn2', 'scale']
         if key_final.startswith("mid_block"):
             place_in_unet = "mid"
         elif key_final.startswith("up_blocks"):
             place_in_unet = "up"
         elif key_final.startswith("down_blocks"):
             place_in_unet = "down"
-        # list_ba = key_final.split('.')  # ['mid_block', 'attentions', '0', 'transformer_blocks', '0', 'attn2', 'processor']
-        # unet.mid_block.attentions[0].transformer_blocks[0].attn2.scale
-        scale = get_nested_value(unet, list_ba)
-        attn_processors[key_final] = attn_processor(config, attention_store, place_in_unet, scale)  # 这只是在初始化MIGCProcessor!走的是init函数
+
+        attn_processors[key_final] = attn_processor(config, attention_store, place_in_unet)  # 这只是在初始化MIGCProcessor!走的是init函数
         attn_processors[key_final].load_state_dict(value_dict)
         attn_processors[key_final].to(device=unet.device, dtype=unet.dtype)
     # 只在mid_block和up_blocks.1上面加载了migc
@@ -116,15 +106,13 @@ def load_migc(unet, attention_store, pretrained_MIGC_path: Union[str, Dict[str, 
     config = {'not_use_migc': True}
     for key in all_processor_keys:
         if key not in attn_processors.keys():
-            list_ba = key.replace('processor', 'scale').split('.')
-            scale = get_nested_value(unet, list_ba)
             if key.startswith("mid_block"):
                 place_in_unet = "mid"
             elif key.startswith("up_blocks"):
                 place_in_unet = "up"
-            elif key.startswith("down_blocks"):     # unet.up_blocks[1].attentions[0].transformer_blocks[0].attn2.scale
+            elif key.startswith("down_blocks"):
                 place_in_unet = "down"
-            attn_processors[key] = attn_processor(config, attention_store, place_in_unet, scale)
+            attn_processors[key] = attn_processor(config, attention_store, place_in_unet)
     unet.set_attn_processor(attn_processors)
     attention_store.num_att_layers = 32
 

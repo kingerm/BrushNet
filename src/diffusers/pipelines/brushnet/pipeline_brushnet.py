@@ -900,7 +900,6 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
         bboxes: List[List[List[float]]] = None,
         MIGCsteps=25,
         NaiveFuserSteps=-1,
-        BaSteps=-1,
         ca_scale=None,
         ea_scale=None,
         sac_scale=None,
@@ -910,7 +909,16 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
         clear_set=False,
         GUI_progress=None,
         **kwargs,
-    ):
+    ):  # 这玩意还不能删。。。删了就报错。得把名字给留着
+        r"""
+                The call function to the pipeline for generation.
+
+                Args:
+
+                Examples:
+
+                Returns:
+                """
         def aug_phase_with_and_function(phase, instance_num):  # 从pipe(*arg)那一块进来
             instance_num = min(instance_num, 7)
             copy_phase = [phase] * instance_num
@@ -1142,7 +1150,7 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
         is_brushnet_compiled = is_compiled_module(self.brushnet)
         is_torch_higher_equal_2_1 = is_torch_version(">=", "2.1")
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            for i, t in enumerate(timesteps):
+            for i, t in enumerate(timesteps):  # i为0-50，不是50到0哦，所以当i为0-25时会使用Migc以及naivefuser
                 # Relevant thread:
                 # https://dev-discuss.pytorch.org/t/cudagraphs-in-pytorch-2-0/1428
                 if (is_unet_compiled and is_brushnet_compiled) and is_torch_higher_equal_2_1:
@@ -1152,7 +1160,7 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
                 # 先看看latent_model_input是否符合migc？
                 # predict the noise residual
-                cross_attention_kwargs = {'prompt_nums': prompt_nums,  # 这些参数可以直接在migcprocessor的__call__里面使用
+                cross_attention_kwargs = {'prompt_nums': prompt_nums,
                                           'bboxes': bboxes,
                                           'ith': i,
                                           'embeds_pooler': embeds_pooler,
@@ -1161,7 +1169,6 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
                                           'width': width,
                                           'MIGCsteps': MIGCsteps,
                                           'NaiveFuserSteps': NaiveFuserSteps,
-                                          'BaSteps': BaSteps,  # 加入bounded attention的相关操作哦
                                           'ca_scale': ca_scale,
                                           'ea_scale': ea_scale,
                                           'sac_scale': sac_scale,
