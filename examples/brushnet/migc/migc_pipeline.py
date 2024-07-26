@@ -27,8 +27,9 @@ import argparse
 import yaml
 import cv2
 import math
-from migc.migc_arch import MIGC, NaiveFuser
+from migc.migc_arch import MIGC, NaiveFuser, BaMask
 from scipy.ndimage import uniform_filter, gaussian_filter
+from einops.einops import rearrange
 
 logger = logging.get_logger(__name__)
 
@@ -82,16 +83,57 @@ def get_sup_mask(mask_list):
 
 
 class MIGCProcessor(nn.Module):  # 这看起来就像是migc的net！得好好研究一下  # 这是嵌入在unet里面的attention processor
-    def __init__(self, config, attnstore, place_in_unet):
+    EPSILON = 1e-5
+    def __init__(self, config, attnstore, place_in_unet, scale):
         super().__init__()
         self.attnstore = attnstore
         self.place_in_unet = place_in_unet
         self.not_use_migc = config['not_use_migc']
-        self.naive_fuser = NaiveFuser()        
+        self.naive_fuser = NaiveFuser()
         self.embedding = {}
         if not self.not_use_migc:
             self.migc = MIGC(config['C'])  # 这里是进入migc_arch的MIGC类中进行初始化
-
+        # 下面是ba的参数部分，只有放在这里才能记录吧
+        self.scale = scale
+        self.cross_mask_layers = {14, 15, 16, 17, 18, 19}
+        self.self_mask_layers = {14, 15, 16, 17, 18, 19}
+        self.eos_token_index = None
+        self.filter_token_indices = None
+        self.leading_token_indices = None
+        self.mask_cross_during_guidance = True
+        self.mask_eos = True
+        self.cross_loss_coef = 1.5
+        self.self_loss_coef = 0.5
+        self.max_guidance_iter = 15
+        self.max_guidance_iter_per_step = 5
+        self.start_step_size = 18
+        self.end_step_size = 5
+        self.loss_stopping_value = 0.2
+        self.min_clustering_step = 15
+        self.cross_mask_threshold = 0.2
+        self.self_mask_threshold = 0.2
+        self.delta_refine_mask_steps = 5
+        self.pca_rank = None
+        self.num_clusters = None
+        self.num_clusters_per_box = 3
+        self.max_resolution = None
+        self.map_dir = None
+        self.debug = False
+        self.delta_debug_attention_steps = 20
+        self.delta_debug_mask_steps = 5
+        self.debug_layers = None
+        self.saved_resolution = 64
+        self.optimized = False
+        self.cross_foreground_values = []
+        self.self_foreground_values = []
+        self.cross_background_values = []
+        self.self_background_values = []
+        self.mean_cross_map = 0
+        self.num_cross_maps = 0
+        self.mean_self_map = 0
+        self.num_self_maps = 0
+        self.self_masks = None
+        self.num_heads = 8
     def __call__(
             self,
             attn: Attention,
@@ -106,7 +148,8 @@ class MIGCProcessor(nn.Module):  # 这看起来就像是migc的net！得好好�
             height=512,
             width=512,
             MIGCsteps=20,
-            NaiveFuserSteps=-1,
+            NaiveFuserSteps=-1,  # 这里再加一个basteps进行mask refine控制
+            BaSteps=-1,
             ca_scale=None,
             ea_scale=None,
             sac_scale=None,
@@ -121,8 +164,10 @@ class MIGCProcessor(nn.Module):  # 这看起来就像是migc的net！得好好�
         )
         
         instance_num = len(bboxes[0])
-
-        if ith > MIGCsteps:  # migcsteps为25，当处于inference后半段时，不使用migc
+        use_ba = False
+        if ith >= BaSteps:
+            use_ba = True
+        if ith >= MIGCsteps:  # migcsteps为25，当处于inference后半段时，不使用migc  # 25的时候还在用migc，有点怪。因为是0-49，所以25不应该用了
             not_use_migc = True
         else:
             not_use_migc = self.not_use_migc
@@ -178,13 +223,34 @@ class MIGCProcessor(nn.Module):  # 这看起来就像是migc的net！得好好�
         hidden_states = attn.to_out[0](hidden_states)
         hidden_states = attn.to_out[1](hidden_states)
         # q k v probs hidden_states全是float16
+        if use_ba:
+            judge = query.shape == torch.Size([16, 256, 160]) #and self.place_in_unet == 'up'
+            batch_size = query.size(0) // self.num_heads  # 用的是forward而不是__call__!
+            n = query.size(1)
+            d = key.size(1)
+            dtype = query.dtype
+            device = query.device
+            if is_cross:
+                return hidden_states
+                # masks = self._hide_other_subjects_from_tokens(batch_size // 2, n, d, dtype, device)
+            else:
+                masks = self._hide_other_subjects_from_subjects(batch_size // 2, ith, bboxes, n, dtype, device)
+            # 这里的masks是attention的masks，所以size为(2, 1, 64, 64)。但migc并没有用到attention mask?得再确定一下
+            sim = torch.einsum('b i d, b j d -> b i j', query, key) * self.scale  # 这是做scale-dot production
+            sim = sim.reshape(batch_size, self.num_heads, n, d) + masks
+            attn = sim.reshape(-1, n, d).softmax(-1)
+            self._save(attn, is_cross, self.num_heads, self.place_in_unet, judge)
+            out = torch.bmm(attn, value)
+            hidden_states = rearrange(out, '(b h) n d -> b n (h d)', h=self.num_heads)
+            return hidden_states
         ###### Self-Attention Results ######
-        if not is_cross:  
+        if not is_cross:
             return hidden_states  # 从这里返回了
 
         ###### Vanilla Cross-Attention Results ######
         if is_vanilla_cross:  # 如果naivefusersteps拉满，必然不会在这里return，一定会经过下面的self.migc或者self.naivefuser
             return hidden_states
+
 
         # 上述两个条件是不使用migc的时候，直接返回对应的值。下面才是重要的部分
 
@@ -213,7 +279,7 @@ class MIGCProcessor(nn.Module):  # 这看起来就像是migc的net！得好好�
         # supplement_mask = F.interpolate(supplement_mask, (height//8, width//8), mode='bilinear').float()
         supplement_mask = F.interpolate(supplement_mask, (height // 8, width // 8), mode='bilinear').half()
         supplement_mask = supplement_mask.to(hidden_states.device)  # (1, 1, H, W)
-        
+        # guidance_mask也是(1, 4, 64, 64)的大小(对于512、512而言)，所以可以直接用那个优化mask的方法，直接copy过来看看先
         guidance_masks = np.concatenate(guidance_masks, axis=0)
         guidance_masks = guidance_masks[None, ...]
         # guidance_masks = torch.from_numpy(guidance_masks).float().to(cond_ca_output.device)
@@ -249,8 +315,204 @@ class MIGCProcessor(nn.Module):  # 这看起来就像是migc的net！得好好�
         hidden_states_cond = hidden_states_cond.squeeze(1)
 
         hidden_states = torch.cat([hidden_states_uncond, hidden_states_cond])
+        self.cur_steps += 1
         return hidden_states
 
+    def _save(self, attn, is_cross, num_heads, place_in_unet, judge):
+        _, attn = attn.chunk(2)
+        attn = attn.reshape(-1, num_heads, *attn.shape[-2:])  # b h n k
+
+        self._save_mask_maps(attn, is_cross, place_in_unet, judge)
+
+    def _save_mask_maps(self, attn, is_cross, place_in_unet, judge):
+        if (
+                (self.optimized) or
+                (is_cross and not (place_in_unet == 'up' and judge)) or
+                ((not is_cross) and (not (place_in_unet == 'up' and judge)))
+        ):
+            return
+        if is_cross:
+            attn = attn[..., self.leading_token_indices]
+            mean_map = self.mean_cross_map
+            num_maps = self.num_cross_maps
+        else:
+            mean_map = self.mean_self_map
+            num_maps = self.num_self_maps
+
+        num_maps += 1
+        attn = attn.mean(dim=1)  # mean over heads
+        mean_map = ((num_maps - 1) / num_maps) * mean_map + (1 / num_maps) * attn
+        if is_cross:
+            self.mean_cross_map = mean_map
+            self.num_cross_maps = num_maps
+        else:
+            self.mean_self_map = mean_map  # 这只有14 16 18层会记录
+            self.num_self_maps = num_maps
+
+    # 下面是mask refine部分相关函数
+    def _hide_other_subjects_from_tokens(self, batch_size, ith, bboxes, n, d, dtype, device):  # b h i j
+        resolution = int(n ** 0.5)
+        subject_masks, background_masks = self._obtain_masks(resolution, ith, bboxes, batch_size=batch_size,
+                                                             device=device)  # b s n
+        include_background = self.optimized or (
+                not self.mask_cross_during_guidance and self.cur_step < self.max_guidance_iter_per_step)
+        subject_masks = torch.logical_or(subject_masks,
+                                         background_masks.unsqueeze(1)) if include_background else subject_masks
+        min_value = torch.finfo(dtype).min
+        sim_masks = torch.zeros((batch_size, n, d), dtype=dtype, device=device)  # b i j
+        for token_indices in (*self.subject_token_indices, self.filter_token_indices):
+            sim_masks[:, :, token_indices] = min_value
+
+        for batch_index in range(batch_size):
+            for subject_mask, token_indices in zip(subject_masks[batch_index], self.subject_token_indices):
+                for token_index in token_indices:
+                    sim_masks[batch_index, subject_mask, token_index] = 0
+
+        if self.mask_eos and not include_background:
+            for batch_index, background_mask in zip(range(batch_size), background_masks):
+                sim_masks[batch_index, background_mask, self.eos_token_index] = min_value
+
+        return torch.cat((torch.zeros_like(sim_masks), sim_masks)).unsqueeze(1)
+
+    def _hide_other_subjects_from_subjects(self, batch_size, ith, bboxes, n, dtype, device):  # b h i j
+        resolution = int(n ** 0.5)
+        subject_masks, background_masks = self._obtain_masks(resolution, ith, bboxes, batch_size=batch_size,
+                                                             device=device)  # b s n
+        min_value = torch.finfo(dtype).min
+        sim_masks = torch.zeros((batch_size, n, n), dtype=dtype, device=device)  # b i j
+        for batch_index, background_mask in zip(range(batch_size), background_masks):
+            all_subject_mask = ~background_mask.unsqueeze(0) * ~background_mask.unsqueeze(1)
+            sim_masks[batch_index, all_subject_mask] = min_value
+
+        for batch_index in range(batch_size):
+            for subject_mask in subject_masks[batch_index]:
+                subject_sim_mask = sim_masks[batch_index, subject_mask]
+                condition = torch.logical_or(subject_sim_mask == 0, subject_mask.unsqueeze(0))
+                sim_masks[batch_index, subject_mask] = torch.where(condition, 0, min_value).to(dtype=dtype)
+
+        return torch.cat((sim_masks, sim_masks)).unsqueeze(1)
+
+    # obtain_masks有点像是refine mask的函数哦
+    def _obtain_masks(self, resolution, ith, bboxes, return_boxes=False, return_existing=False, batch_size=None,
+                      device=None):
+        return_boxes = return_boxes or (return_existing and self.self_masks is None)
+        # 这里就是开始refine mask的步骤！当return_boxes = False且现在的步数大于最小聚类步数
+        if return_boxes or ith < 1:
+            masks = self._convert_boxes_to_masks(resolution, bboxes, device=device).unsqueeze(0)
+            if batch_size is not None:
+                masks = masks.expand(batch_size, *masks.shape[1:])
+        else:  # 这里就是开始refine mask的步骤！当return_boxes = False且现在的步数大于最小聚类步数
+            masks = self._obtain_self_masks(resolution, ith, bboxes, return_existing=return_existing)  # 获得聚类后的mask后再返回
+            if device is not None:
+                masks = masks.to(device=device)
+
+        background_mask = masks.sum(dim=1) == 0
+        return masks, background_mask
+
+    def _convert_boxes_to_masks(self, resolution, bboxes, device=None):  # s n
+        boxes = torch.zeros(len(bboxes), resolution, resolution, dtype=bool, device=device)
+        for i, box in enumerate(bboxes[0]):
+            x0, x1 = box[0] * resolution, box[2] * resolution
+            y0, y1 = box[1] * resolution, box[3] * resolution
+
+            boxes[i, round(y0): round(y1), round(x0): round(x1)] = True
+
+        return boxes.flatten(start_dim=1)
+
+    def _obtain_self_masks(self, resolution, ith, bboxes, return_existing=False):
+        if (
+                (self.self_masks is None)
+        ):
+            self.self_masks = self._fix_zero_masks(self._build_self_masks(ith, bboxes), bboxes)  # 这是每个ith都修整mask
+
+        b, s, n = self.self_masks.shape
+        mask_resolution = int(n ** 0.5)
+        self_masks = self.self_masks.reshape(b, s, mask_resolution, mask_resolution).float()
+        self_masks = F.interpolate(self_masks, resolution, mode='nearest-exact')
+        return self_masks.flatten(start_dim=2).bool()
+
+    # build_self_masks更像是生成sa mask的函数！
+    def _build_self_masks(self, ith, bboxes):
+        c, clusters = self._cluster_self_maps()  # b n
+        cluster_masks = torch.stack([(clusters == cluster_index) for cluster_index in range(c)], dim=2)  # b n c
+        cluster_area = cluster_masks.sum(dim=1, keepdim=True)  # b 1 c
+
+        n = clusters.size(1)
+        resolution = int(n ** 0.5)
+        cross_masks = self._obtain_cross_masks(resolution, ith, bboxes)  # b s n
+        cross_mask_area = cross_masks.sum(dim=2, keepdim=True)  # b s 1
+
+        intersection = torch.bmm(cross_masks.float(), cluster_masks.float())  # b s c
+        min_area = torch.minimum(cross_mask_area, cluster_area)  # b s c
+        score_per_cluster, subject_per_cluster = torch.max(intersection / min_area, dim=1)  # b c
+        subjects = torch.gather(subject_per_cluster, 1, clusters)  # b n
+        scores = torch.gather(score_per_cluster, 1, clusters)  # b n
+
+        s = cross_masks.size(1)
+        self_masks = torch.stack([(subjects == subject_index) for subject_index in range(s)], dim=1)  # b s n
+        scores = scores.unsqueeze(1).expand(-1, s, n)  # b s n
+        self_masks[scores < self.self_mask_threshold] = False
+        self._save_maps(self_masks, 'self_masks')
+        return self_masks
+
+    def _cluster_self_maps(self):  # b s n
+        self_maps = self._compute_maps(self.mean_self_map)  # b n m  # self.mean_self_map一开始是0，为int？这个正常吗？
+        if self.pca_rank is not None:
+            dtype = self_maps.dtype
+            _, _, eigen_vectors = torch.pca_lowrank(self_maps.float(), self.pca_rank)
+            self_maps = torch.matmul(self_maps, eigen_vectors.to(dtype=dtype))
+        # 这就是把sa maps丢进去聚类的
+        clustering_results = self.clustering(self_maps, centers=self.centers)
+        self.clustering.num_init = 1  # clustering is deterministic after the first time
+        self.centers = clustering_results.centers
+        clusters = clustering_results.labels
+        num_clusters = self.clustering.n_clusters
+        self._save_maps(clusters / num_clusters, f'clusters')
+        return num_clusters, clusters
+
+    def _obtain_cross_masks(self, resolution, ith, bboxes, scale=10):
+        maps = self._compute_maps(self.mean_cross_map, resolution=resolution)  # b n k
+        maps = F.sigmoid(scale * (maps - self.cross_mask_threshold))
+        maps = self._normalize_maps(maps, reduce_min=True)
+        maps = maps.transpose(1, 2)  # b k n
+        existing_masks, _ = self._obtain_masks(
+            resolution, ith, bboxes, return_existing=True, batch_size=maps.size(0), device=maps.device)
+        maps = maps * existing_masks.to(dtype=maps.dtype)
+        self._save_maps(maps, 'cross_masks')
+        return maps
+
+    def _fix_zero_masks(self, masks, bboxes):
+        b, s, n = masks.shape
+        resolution = int(n ** 0.5)
+        boxes = self._convert_boxes_to_masks(resolution, bboxes, device=masks.device)  # s n
+
+        for i in range(b):
+            for j in range(s):
+                if masks[i, j].sum() == 0:
+                    print('******Found a zero mask!******')
+                    for k in range(s):
+                        masks[i, k] = boxes[j] if (k == j) else masks[i, k].logical_and(~boxes[j])
+
+        return masks
+
+    def _compute_maps(self, maps, resolution=None):  # b n k
+        if resolution is not None:
+            b, n, k = maps.shape
+            original_resolution = int(n ** 0.5)
+            maps = maps.transpose(1, 2).reshape(b, k, original_resolution, original_resolution)
+            maps = F.interpolate(maps, resolution, mode='bilinear', antialias=True)
+            maps = maps.reshape(b, k, -1).transpose(1, 2)
+
+        maps = self._normalize_maps(maps)
+        return maps
+
+    @classmethod
+    def _normalize_maps(cls, maps, reduce_min=False):  # b n k
+        max_values = maps.max(dim=1, keepdim=True)[0]
+        min_values = maps.min(dim=1, keepdim=True)[0] if reduce_min else 0
+        numerator = maps - min_values
+        denominator = max_values - min_values + cls.EPSILON
+        return numerator / denominator
 
 class StableDiffusionMIGCPipeline(StableDiffusionPipeline):
     def __init__(

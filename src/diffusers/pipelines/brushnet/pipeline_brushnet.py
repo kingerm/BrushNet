@@ -900,6 +900,7 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
         bboxes: List[List[List[float]]] = None,
         MIGCsteps=25,
         NaiveFuserSteps=-1,
+        BaSteps=-1,
         ca_scale=None,
         ea_scale=None,
         sac_scale=None,
@@ -1160,7 +1161,7 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
                 # 先看看latent_model_input是否符合migc？
                 # predict the noise residual
-                cross_attention_kwargs = {'prompt_nums': prompt_nums,
+                cross_attention_kwargs = {'prompt_nums': prompt_nums,  # 这些参数可以直接在migcprocessor的__call__里面使用
                                           'bboxes': bboxes,
                                           'ith': i,
                                           'embeds_pooler': embeds_pooler,
@@ -1169,6 +1170,7 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
                                           'width': width,
                                           'MIGCsteps': MIGCsteps,
                                           'NaiveFuserSteps': NaiveFuserSteps,
+                                          'BaSteps': BaSteps,  # 加入bounded attention的相关操作哦
                                           'ca_scale': ca_scale,
                                           'ea_scale': ea_scale,
                                           'sac_scale': sac_scale,

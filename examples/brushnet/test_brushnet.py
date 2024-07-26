@@ -1,6 +1,6 @@
 import os
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'  # 本地改镜像站才能调试
-os.environ['CUDA_VISIBLE_DEVICES'] = '2'
+os.environ['CUDA_VISIBLE_DEVICES'] = '3'
 from diffusers import StableDiffusionBrushNetPipeline, BrushNetModel, UniPCMultistepScheduler, EulerDiscreteScheduler
 import torch    # brushnet使用的是UniPCMultistepScheduler，而migc是EulerDiscreteScheduler，这是一个矛盾
 import cv2
@@ -106,27 +106,25 @@ pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config)
 # memory optimization.
 pipe.enable_model_cpu_offload()
 
-image_path="src/renlian.jpg"
+image_path="src/test_image.jpg"
 init_image = cv2.imread(image_path)[:,:,::-1]
 # mask_image = 1.*(cv2.imread(mask_path).sum(-1)>255)[:,:,np.newaxis]
-mask_path1 = 'src/renlian_maozi_seg.jpg'
-mask_path2 = 'src/renlian_glasses.jpg'
-mask_path3 = 'src/renlian_scarf.jpg'
-mask_path4 = 'src/renlian_medal.jpg'
+mask_path1 = 'src/mask_round1.png'
+mask_path2 = 'src/mask_round2.png'
 # mask_path3 = 'src/renlian3_necklace.jpg'
 # mask_path2 = 'src/sofa_mask2.jpg'
 kernel = np.ones((15, 15), np.uint8)  # dilate核
 mask_image1, box_xyxy1, name1, d_mask_image1 = read_mask(mask_path1, kernel)
 mask_image2, box_xyxy2, name2, d_mask_image2 = read_mask(mask_path2, kernel)
-mask_image3, box_xyxy3, name3, d_mask_image3 = read_mask(mask_path3, kernel)
-mask_image4, box_xyxy4, name4, d_mask_image4 = read_mask(mask_path4, kernel)
+# mask_image3, box_xyxy3, name3, d_mask_image3 = read_mask(mask_path3, kernel)
+# mask_image4, box_xyxy4, name4, d_mask_image4 = read_mask(mask_path4, kernel)
 # 定义膨胀kernel  # 上面的mask_image都是(512, 512, 1)，所以给dilated_mask_image添加一维之后就可以直接相加了
-mask_image_wo_d = mask_image1 + mask_image2 + mask_image3 + mask_image4# + mask_image3 + mask_image4  # 记录没有dilate的mask
-mask_image = d_mask_image1 + d_mask_image2 + d_mask_image3 + d_mask_image4# + d_mask_image3 + d_mask_image4
+mask_image_wo_d = mask_image1 + mask_image2# + mask_image3 + mask_image4# + mask_image3 + mask_image4  # 记录没有dilate的mask
+mask_image = mask_image1 + mask_image2# + d_mask_image3 + d_mask_image4# + d_mask_image3 + d_mask_image4
 mask_image[mask_image > 1.0] = 1.0  # 若mask有重叠，重叠区域相加会大于1，要把它们置为1
 mask = mask_image  # 这里把mask_image给保存下来，方便后面画图
 mask_wo_d = mask_image_wo_d
-name_t = name1 + name2 + name3 + name4
+name_t = name1 + name2# + name3 + name4
 name = 'output' + name_t + '.png'
 
 init_image_c = init_image
@@ -140,7 +138,7 @@ h, w = cal_hw(h, w)
 init_image = Image.fromarray(init_image.astype(np.uint8)).convert("RGB")
 mask_image = Image.fromarray(mask_image.astype(np.uint8).repeat(3,-1)*255).convert("RGB")  # 最右边一维重复三遍，转黑白图再转RGB
 # init_image.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/init_image_T.png', quality=100)
-mask_image.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/mask_renlian_seg.png', quality=100)
+# mask_image.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/mask_renlian_seg.png', quality=100)
 generator = torch.Generator("cuda").manual_seed(1234)
 seed = 1234
 seed_everything(seed)
@@ -161,7 +159,8 @@ image = pipe(
     # 加入migc相关的形参
     bboxes=bboxes,
     MIGCsteps=25,
-    NaiveFuserSteps=50,
+    NaiveFuserSteps=25,
+    BaSteps=0,
     aug_phase_with_and=False,
     negative_prompt=negative_prompt,
     sa_preserve=True,  # sa_preserve和use_sa_preserve开启consistent-mig算法
@@ -172,10 +171,10 @@ image = pipe(
 
 image.save('before.png')
 
-prompt_final = [['masterpiece, best quality, brown colored hat, black colored glasses, gray colored scarf, yellow colored medal',
-                 'brown colored hat', 'black colored glasses', 'gray colored scarf', 'yellow colored medal'
+prompt_final = [['masterpiece, best quality, orange colored orange, yellow colored lemon',
+                 'orange colored orange', 'yellow colored lemon'
                  ]]
-bboxes = [[box_xyxy1, box_xyxy2, box_xyxy3, box_xyxy4]]  # 优化了代码，使其不再需要手动计算bboxes，更加智能！
+bboxes = [[box_xyxy1, box_xyxy2]]  # 优化了代码，使其不再需要手动计算bboxes，更加智能！
 
 
 image = pipe(
@@ -188,7 +187,8 @@ image = pipe(
     # 加入migc相关的形参
     bboxes=bboxes,
     MIGCsteps=25,
-    NaiveFuserSteps=50,
+    NaiveFuserSteps=25,
+    BaSteps=25,
     aug_phase_with_and=False,
     negative_prompt=negative_prompt,
     sa_preserve=True,  # sa_preserve和use_sa_preserve开启consistent-mig算法
