@@ -271,39 +271,6 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
         imgg = cv2.drawContours(img, contours=contours, contourIdx=-1, color=(0, 0, 0), thickness=1)
         return imgg
 
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline._encode_prompt
-    def _encode_prompt(  # 这里比migc多一个lora_scale，不知道是干啥的？
-        self,
-        prompt,
-        device,
-        num_images_per_prompt,
-        do_classifier_free_guidance,
-        negative_prompt=None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-        lora_scale: Optional[float] = None,
-        **kwargs,
-    ):
-        deprecation_message = "`_encode_prompt()` is deprecated and it will be removed in a future version. Use `encode_prompt()` instead. Also, be aware that the output format changed from a concatenated tensor to a tuple."
-        deprecate("_encode_prompt()", "1.0.0", deprecation_message, standard_warn=False)
-
-        prompt_embeds_tuple = self.encode_prompt(
-            prompt=prompt,
-            device=device,
-            num_images_per_prompt=num_images_per_prompt,
-            do_classifier_free_guidance=do_classifier_free_guidance,
-            negative_prompt=negative_prompt,
-            prompt_embeds=prompt_embeds,
-            negative_prompt_embeds=negative_prompt_embeds,
-            lora_scale=lora_scale,
-            **kwargs,
-        )
-
-        # concatenate for backwards comp
-        prompt_embeds = torch.cat([prompt_embeds_tuple[1], prompt_embeds_tuple[0]])
-
-        return prompt_embeds
-
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.encode_prompt
     def encode_prompt(
             self,
@@ -468,7 +435,7 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
             # to avoid doing two forward passes
             final_prompt_embeds = torch.cat(
                 [negative_prompt_embeds, prompt_embeds])  # 这是Migc的特殊之处。需要搞清楚为什么need to do two forward passes?
-
+            # 这里返回的第一个值是ng_embeds+normal_embeds，第二个是normal_embeds
         return final_prompt_embeds, prompt_embeds, embeds_pooler[:, None, :]
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.encode_image
@@ -900,6 +867,9 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
         bboxes: List[List[List[float]]] = None,
         MIGCsteps=25,
         NaiveFuserSteps=-1,
+        BaSteps=-1,
+        prompt_ba=None,
+        subject_token_indices=None,
         ca_scale=None,
         ea_scale=None,
         sac_scale=None,
@@ -919,6 +889,15 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
 
                 Returns:
                 """
+        ######处理prompt_ba的部分
+        text_ba = self.tokenizer(
+            prompt_ba,
+            padding="max_length",
+            max_length=77,
+            return_tensors="pt"
+        )
+        text_embeddings_ba = self.text_encoder(text_ba.input_ids.to(torch.device("cuda")))[0]
+        ######
         def aug_phase_with_and_function(phase, instance_num):  # 从pipe(*arg)那一块进来
             instance_num = min(instance_num, 7)
             copy_phase = [phase] * instance_num
@@ -1017,6 +996,7 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
             prompt_embeds=prompt_embeds,
             negative_prompt_embeds=negative_prompt_embeds,
         )  # 这一段也没问题嗷
+        prompt_embeds = torch.concat([prompt_embeds, text_embeddings_ba])  # text_embeddings_ba == prompt_embeds[-1].unsqueeze(0)
         # For classifier free guidance, we need to do two forward passes.
         # Here we concatenate the unconditional and text embeddings into a single batch
         # to avoid doing two forward passes
@@ -1169,6 +1149,7 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
                                           'width': width,
                                           'MIGCsteps': MIGCsteps,
                                           'NaiveFuserSteps': NaiveFuserSteps,
+                                          'BaSteps': BaSteps,
                                           'ca_scale': ca_scale,
                                           'ea_scale': ea_scale,
                                           'sac_scale': sac_scale,

@@ -93,8 +93,8 @@ assert os.path.isfile(migc_ckpt_path), "Please download the ckpt of migc and put
 # pipe2 = StableDiffusionMIGCPipeline.from_pretrained(base_model_path)  # 都用sd1.5的权重 # 先确保两者的unet相同，才好将migc加进来
 # 这里即使两者都用sd1.5进行from_pretrained，pipe.unet依旧不一样，令人困惑
 
-pipe.attention_store = AttentionStore()  # migc部分
-load_migc(pipe.unet, pipe.attention_store, migc_ckpt_path, attn_processor=MIGCProcessor)  # 这里处理了unet，使得需要额外参数作为输入
+pipe.attention_store = AttentionStore() # migc部分
+load_migc(pipe, pipe.unet, pipe.attention_store, migc_ckpt_path, attn_processor=MIGCProcessor)  # 这里处理了unet，使得需要额外参数作为输入
 pipe = pipe.to("cuda")
 # speed up diffusion process with faster scheduler and memory optimization
 # pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
@@ -145,34 +145,37 @@ seed_everything(seed)
 # 初始化migc需要的形参  # 需要把brushnet的prompt相关代码全部换成migc的
 # prompt_final = [['masterpiece, best quality, orange colored orange, yellow colored lemon',
 #                  'orange colored orange', 'yellow colored lemon']]  # 用migc的multi instances prompt才能实现多物体控制
-prompt_final = [['']]  # 什么都没有，啥也不编辑跑一次  # 判断prompt_final是否为0以关闭brushnet的branch，这使得模型能够输出一模一样的图片
-bboxes = [[]]  # 优化了代码，使其不再需要手动计算bboxes，更加智能！
 negative_prompt = 'worst quality, low quality, bad anatomy, watermark, text, blurry'
+# prompt_final = [['']]  # 什么都没有，啥也不编辑跑一次  # 判断prompt_final是否为0以关闭brushnet的branch，这使得模型能够输出一模一样的图片
+# bboxes = [[]]  # 优化了代码，使其不再需要手动计算bboxes，更加智能！
+#
+# image = pipe(
+#     prompt_final,
+#     init_image_c,
+#     mask_image_c,
+#     num_inference_steps=50,
+#     generator=generator,
+#     brushnet_conditioning_scale=brushnet_conditioning_scale,
+#     # 加入migc相关的形参
+#     bboxes=bboxes,
+#     MIGCsteps=25,
+#     NaiveFuserSteps=25,
+#     BaSteps=0,
+#     aug_phase_with_and=False,
+#     negative_prompt=negative_prompt,
+#     sa_preserve=True,  # sa_preserve和use_sa_preserve开启consistent-mig算法
+#     # use_sa_preserve=True,
+#     height=h,  # 这里的h w是否应该为16或者32的倍数？仅是8的倍数是不够的
+#     width=w   # 和预想的一样，仅为16的倍数也不够。要为32的倍数，且除以64的余数均同时为0或32才行=>不对，最好全为64的倍数
+# ).images[0]
+#
+# image.save('before.png')
 
-image = pipe(
-    prompt_final,
-    init_image_c,
-    mask_image_c,
-    num_inference_steps=50,
-    generator=generator,
-    brushnet_conditioning_scale=brushnet_conditioning_scale,
-    # 加入migc相关的形参
-    bboxes=bboxes,
-    MIGCsteps=25,
-    NaiveFuserSteps=25,
-    aug_phase_with_and=False,
-    negative_prompt=negative_prompt,
-    sa_preserve=True,  # sa_preserve和use_sa_preserve开启consistent-mig算法
-    # use_sa_preserve=True,
-    height=h,  # 这里的h w是否应该为16或者32的倍数？仅是8的倍数是不够的
-    width=w   # 和预想的一样，仅为16的倍数也不够。要为32的倍数，且除以64的余数均同时为0或32才行=>不对，最好全为64的倍数
-).images[0]
-
-image.save('before.png')
-
-prompt_final = [['masterpiece, best quality, orange colored orange, yellow colored lemon',
-                 'orange colored orange', 'yellow colored lemon'
+prompt_final = [['A orange colored orange and a yellow colored lemon',  # 我发现更改global prompt不会产生太大的影响，不用死板地和源码一致
+                 'orange colored orange', 'yellow colored lemon' # 加一个'a orange orange and a yellow lemon'给ba用
                  ]]
+prompt_ba = ['']  # 本来是要prompts = [prompt] * batch_size，这样写省事
+subject_token_indices = [[2, 3], [6, 7]]
 bboxes = [[box_xyxy1, box_xyxy2]]  # 优化了代码，使其不再需要手动计算bboxes，更加智能！
 
 
@@ -186,7 +189,10 @@ image = pipe(
     # 加入migc相关的形参
     bboxes=bboxes,
     MIGCsteps=25,
-    NaiveFuserSteps=25,
+    NaiveFuserSteps=40,
+    BaSteps=40,
+    prompt_ba=prompt_ba,
+    subject_token_indices=subject_token_indices,
     aug_phase_with_and=False,
     negative_prompt=negative_prompt,
     sa_preserve=True,  # sa_preserve和use_sa_preserve开启consistent-mig算法
