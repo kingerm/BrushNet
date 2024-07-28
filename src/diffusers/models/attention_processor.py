@@ -522,7 +522,7 @@ class Attention(nn.Module):
             )
         cross_attention_kwargs = {k: w for k, w in cross_attention_kwargs.items() if k in attn_parameters}
 
-        return self.processor(  # 这里会进入migcprocessor里面
+        return self.processor(
             self,
             hidden_states,
             encoder_hidden_states=encoder_hidden_states,

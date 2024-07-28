@@ -1,6 +1,6 @@
 import os
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'  # 本地改镜像站才能调试
-os.environ['CUDA_VISIBLE_DEVICES'] = '3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '2'
 from diffusers import StableDiffusionBrushNetPipeline, BrushNetModel, UniPCMultistepScheduler, EulerDiscreteScheduler
 import torch    # brushnet使用的是UniPCMultistepScheduler，而migc是EulerDiscreteScheduler，这是一个矛盾
 import cv2
@@ -93,8 +93,8 @@ assert os.path.isfile(migc_ckpt_path), "Please download the ckpt of migc and put
 # pipe2 = StableDiffusionMIGCPipeline.from_pretrained(base_model_path)  # 都用sd1.5的权重 # 先确保两者的unet相同，才好将migc加进来
 # 这里即使两者都用sd1.5进行from_pretrained，pipe.unet依旧不一样，令人困惑
 
-pipe.attention_store = AttentionStore() # migc部分
-load_migc(pipe, pipe.unet, pipe.attention_store, migc_ckpt_path, attn_processor=MIGCProcessor)  # 这里处理了unet，使得需要额外参数作为输入
+pipe.attention_store = AttentionStore()  # migc部分
+load_migc(pipe.unet, pipe.attention_store, migc_ckpt_path, attn_processor=MIGCProcessor)  # 这里处理了unet，使得需要额外参数作为输入
 pipe = pipe.to("cuda")
 # speed up diffusion process with faster scheduler and memory optimization
 # pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
@@ -106,25 +106,27 @@ pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config)
 # memory optimization.
 pipe.enable_model_cpu_offload()
 
-image_path="src/test_image.jpg"
+image_path="src/renlian.jpg"
 init_image = cv2.imread(image_path)[:,:,::-1]
 # mask_image = 1.*(cv2.imread(mask_path).sum(-1)>255)[:,:,np.newaxis]
-mask_path1 = 'src/mask_round1.png'
-mask_path2 = 'src/mask_round2.png'
+mask_path1 = 'src/renlian_maozi_seg.jpg'
+mask_path2 = 'src/renlian_glasses.jpg'
+mask_path3 = 'src/renlian_scarf.jpg'
+mask_path4 = 'src/renlian_medal.jpg'
 # mask_path3 = 'src/renlian3_necklace.jpg'
 # mask_path2 = 'src/sofa_mask2.jpg'
 kernel = np.ones((15, 15), np.uint8)  # dilate核
 mask_image1, box_xyxy1, name1, d_mask_image1 = read_mask(mask_path1, kernel)
 mask_image2, box_xyxy2, name2, d_mask_image2 = read_mask(mask_path2, kernel)
-# mask_image3, box_xyxy3, name3, d_mask_image3 = read_mask(mask_path3, kernel)
-# mask_image4, box_xyxy4, name4, d_mask_image4 = read_mask(mask_path4, kernel)
+mask_image3, box_xyxy3, name3, d_mask_image3 = read_mask(mask_path3, kernel)
+mask_image4, box_xyxy4, name4, d_mask_image4 = read_mask(mask_path4, kernel)
 # 定义膨胀kernel  # 上面的mask_image都是(512, 512, 1)，所以给dilated_mask_image添加一维之后就可以直接相加了
-mask_image_wo_d = mask_image1 + mask_image2# + mask_image3 + mask_image4# + mask_image3 + mask_image4  # 记录没有dilate的mask
-mask_image = mask_image1 + mask_image2# + d_mask_image3 + d_mask_image4# + d_mask_image3 + d_mask_image4
+mask_image_wo_d = mask_image1 + mask_image2 + mask_image3 + mask_image4# + mask_image3 + mask_image4  # 记录没有dilate的mask
+mask_image = d_mask_image1 + d_mask_image2 + d_mask_image3 + d_mask_image4# + d_mask_image3 + d_mask_image4
 mask_image[mask_image > 1.0] = 1.0  # 若mask有重叠，重叠区域相加会大于1，要把它们置为1
 mask = mask_image  # 这里把mask_image给保存下来，方便后面画图
 mask_wo_d = mask_image_wo_d
-name_t = name1 + name2# + name3 + name4
+name_t = name1 + name2 + name3 + name4
 name = 'output' + name_t + '.png'
 
 init_image_c = init_image
@@ -138,45 +140,42 @@ h, w = cal_hw(h, w)
 init_image = Image.fromarray(init_image.astype(np.uint8)).convert("RGB")
 mask_image = Image.fromarray(mask_image.astype(np.uint8).repeat(3,-1)*255).convert("RGB")  # 最右边一维重复三遍，转黑白图再转RGB
 # init_image.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/init_image_T.png', quality=100)
-# mask_image.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/mask_renlian_seg.png', quality=100)
+mask_image.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/mask_renlian_seg.png', quality=100)
 generator = torch.Generator("cuda").manual_seed(1234)
 seed = 1234
 seed_everything(seed)
 # 初始化migc需要的形参  # 需要把brushnet的prompt相关代码全部换成migc的
 # prompt_final = [['masterpiece, best quality, orange colored orange, yellow colored lemon',
 #                  'orange colored orange', 'yellow colored lemon']]  # 用migc的multi instances prompt才能实现多物体控制
+prompt_final = [['']]  # 什么都没有，啥也不编辑跑一次  # 判断prompt_final是否为0以关闭brushnet的branch，这使得模型能够输出一模一样的图片
+bboxes = [[]]  # 优化了代码，使其不再需要手动计算bboxes，更加智能！
 negative_prompt = 'worst quality, low quality, bad anatomy, watermark, text, blurry'
-# prompt_final = [['']]  # 什么都没有，啥也不编辑跑一次  # 判断prompt_final是否为0以关闭brushnet的branch，这使得模型能够输出一模一样的图片
-# bboxes = [[]]  # 优化了代码，使其不再需要手动计算bboxes，更加智能！
-#
-# image = pipe(
-#     prompt_final,
-#     init_image_c,
-#     mask_image_c,
-#     num_inference_steps=50,
-#     generator=generator,
-#     brushnet_conditioning_scale=brushnet_conditioning_scale,
-#     # 加入migc相关的形参
-#     bboxes=bboxes,
-#     MIGCsteps=25,
-#     NaiveFuserSteps=25,
-#     BaSteps=0,
-#     aug_phase_with_and=False,
-#     negative_prompt=negative_prompt,
-#     sa_preserve=True,  # sa_preserve和use_sa_preserve开启consistent-mig算法
-#     # use_sa_preserve=True,
-#     height=h,  # 这里的h w是否应该为16或者32的倍数？仅是8的倍数是不够的
-#     width=w   # 和预想的一样，仅为16的倍数也不够。要为32的倍数，且除以64的余数均同时为0或32才行=>不对，最好全为64的倍数
-# ).images[0]
-#
-# image.save('before.png')
 
-prompt_final = [['A orange colored orange and a yellow colored lemon',  # 我发现更改global prompt不会产生太大的影响，不用死板地和源码一致
-                 'orange colored orange', 'yellow colored lemon' # 加一个'a orange orange and a yellow lemon'给ba用
+image = pipe(
+    prompt_final,
+    init_image_c,
+    mask_image_c,
+    num_inference_steps=50,
+    generator=generator,
+    brushnet_conditioning_scale=brushnet_conditioning_scale,
+    # 加入migc相关的形参
+    bboxes=bboxes,
+    MIGCsteps=25,
+    NaiveFuserSteps=50,
+    aug_phase_with_and=False,
+    negative_prompt=negative_prompt,
+    sa_preserve=True,  # sa_preserve和use_sa_preserve开启consistent-mig算法
+    # use_sa_preserve=True,
+    height=h,  # 这里的h w是否应该为16或者32的倍数？仅是8的倍数是不够的
+    width=w   # 和预想的一样，仅为16的倍数也不够。要为32的倍数，且除以64的余数均同时为0或32才行=>不对，最好全为64的倍数
+).images[0]
+
+image.save('before.png')
+
+prompt_final = [['masterpiece, best quality, brown colored hat, black colored glasses, gray colored scarf, yellow colored medal',
+                 'brown colored hat', 'black colored glasses', 'gray colored scarf', 'yellow colored medal'
                  ]]
-prompt_ba = ['']  # 本来是要prompts = [prompt] * batch_size，这样写省事
-subject_token_indices = [[2, 3], [6, 7]]
-bboxes = [[box_xyxy1, box_xyxy2]]  # 优化了代码，使其不再需要手动计算bboxes，更加智能！
+bboxes = [[box_xyxy1, box_xyxy2, box_xyxy3, box_xyxy4]]  # 优化了代码，使其不再需要手动计算bboxes，更加智能！
 
 
 image = pipe(
@@ -189,10 +188,7 @@ image = pipe(
     # 加入migc相关的形参
     bboxes=bboxes,
     MIGCsteps=25,
-    NaiveFuserSteps=40,
-    BaSteps=40,
-    prompt_ba=prompt_ba,
-    subject_token_indices=subject_token_indices,
+    NaiveFuserSteps=50,
     aug_phase_with_and=False,
     negative_prompt=negative_prompt,
     sa_preserve=True,  # sa_preserve和use_sa_preserve开启consistent-mig算法
