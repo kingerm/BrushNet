@@ -487,6 +487,10 @@ class MIGCProcessor(nn.Module):  # 这看起来就像是migc的net！得好好�
             not_use_migc = True
         else:
             not_use_migc = self.not_use_migc
+        if ith > MIGCsteps:
+            not_use_migc = True
+        else:
+            not_use_migc = self.not_use_migc
         is_vanilla_cross = (not_use_migc and ith > NaiveFuserSteps)
         if instance_num == 0:
             is_vanilla_cross = True

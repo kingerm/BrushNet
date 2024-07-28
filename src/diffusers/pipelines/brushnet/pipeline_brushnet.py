@@ -898,7 +898,6 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
         )
         text_embeddings_ba = self.text_encoder(text_ba.input_ids.to(torch.device("cuda")))[0]
         ######
-
         def aug_phase_with_and_function(phase, instance_num):  # 从pipe(*arg)那一块进来
             instance_num = min(instance_num, 7)
             copy_phase = [phase] * instance_num
