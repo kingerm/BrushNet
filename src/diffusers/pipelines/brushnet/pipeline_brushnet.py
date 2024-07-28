@@ -898,6 +898,7 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
         )
         text_embeddings_ba = self.text_encoder(text_ba.input_ids.to(torch.device("cuda")))[0]
         ######
+
         def aug_phase_with_and_function(phase, instance_num):  # 从pipe(*arg)那一块进来
             instance_num = min(instance_num, 7)
             copy_phase = [phase] * instance_num
@@ -1130,7 +1131,7 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
         is_brushnet_compiled = is_compiled_module(self.brushnet)
         is_torch_higher_equal_2_1 = is_torch_version(">=", "2.1")
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            for i, t in enumerate(timesteps):  # i为0-50，不是50到0哦，所以当i为0-25时会使用Migc以及naivefuser
+            for i, t in enumerate(timesteps):
                 # Relevant thread:
                 # https://dev-discuss.pytorch.org/t/cudagraphs-in-pytorch-2-0/1428
                 if (is_unet_compiled and is_brushnet_compiled) and is_torch_higher_equal_2_1:
