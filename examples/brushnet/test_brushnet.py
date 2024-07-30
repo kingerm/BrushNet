@@ -115,14 +115,14 @@ mask_path3 = 'src/renlian_scarf.jpg'
 mask_path4 = 'src/renlian_medal.jpg'
 # mask_path3 = 'src/renlian3_necklace.jpg'
 # mask_path2 = 'src/sofa_mask2.jpg'
-kernel = np.ones((15, 15), np.uint8)  # dilate核
+kernel = np.ones((0, 0), np.uint8)  # dilate核
 mask_image1, box_xyxy1, name1, d_mask_image1 = read_mask(mask_path1, kernel)
 mask_image2, box_xyxy2, name2, d_mask_image2 = read_mask(mask_path2, kernel)
 mask_image3, box_xyxy3, name3, d_mask_image3 = read_mask(mask_path3, kernel)
 mask_image4, box_xyxy4, name4, d_mask_image4 = read_mask(mask_path4, kernel)
 # 定义膨胀kernel  # 上面的mask_image都是(512, 512, 1)，所以给dilated_mask_image添加一维之后就可以直接相加了
 mask_image_wo_d = mask_image1 + mask_image2 + mask_image3 + mask_image4# + mask_image3 + mask_image4  # 记录没有dilate的mask
-mask_image = d_mask_image1 + d_mask_image2 + d_mask_image3 + d_mask_image4# + d_mask_image3 + d_mask_image4
+mask_image = mask_image1 + mask_image2 + mask_image3 + mask_image4# + d_mask_image3 + d_mask_image4
 mask_image[mask_image > 1.0] = 1.0  # 若mask有重叠，重叠区域相加会大于1，要把它们置为1
 mask = mask_image  # 这里把mask_image给保存下来，方便后面画图
 mask_wo_d = mask_image_wo_d
@@ -130,7 +130,7 @@ name_t = name1 + name2 + name3 + name4
 name = 'output' + name_t + '.png'
 
 init_image_c = init_image
-mask_image_c = np.zeros_like(mask_image)
+mask_image_c = np.zeros_like(mask_image)  # mask_image中不需要编辑的区域对应为黑色
 init_image_c = Image.fromarray(init_image_c.astype(np.uint8)).convert("RGB")
 mask_image_c = Image.fromarray(mask_image_c.astype(np.uint8).repeat(3,-1)*255).convert("RGB")
 init_image = init_image * (1-mask_image)
@@ -140,43 +140,16 @@ h, w = cal_hw(h, w)
 init_image = Image.fromarray(init_image.astype(np.uint8)).convert("RGB")
 mask_image = Image.fromarray(mask_image.astype(np.uint8).repeat(3,-1)*255).convert("RGB")  # 最右边一维重复三遍，转黑白图再转RGB
 # init_image.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/init_image_T.png', quality=100)
-mask_image.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/mask_renlian_seg.png', quality=100)
+# mask_image.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/mask_renlian_seg.png', quality=100)
 generator = torch.Generator("cuda").manual_seed(1234)
 seed = 1234
 seed_everything(seed)
 # 初始化migc需要的形参  # 需要把brushnet的prompt相关代码全部换成migc的
-# prompt_final = [['masterpiece, best quality, orange colored orange, yellow colored lemon',
-#                  'orange colored orange', 'yellow colored lemon']]  # 用migc的multi instances prompt才能实现多物体控制
-prompt_final = [['']]  # 什么都没有，啥也不编辑跑一次  # 判断prompt_final是否为0以关闭brushnet的branch，这使得模型能够输出一模一样的图片
-bboxes = [[]]  # 优化了代码，使其不再需要手动计算bboxes，更加智能！
-negative_prompt = 'worst quality, low quality, bad anatomy, watermark, text, blurry'
-
-image = pipe(
-    prompt_final,
-    init_image_c,
-    mask_image_c,
-    num_inference_steps=50,
-    generator=generator,
-    brushnet_conditioning_scale=brushnet_conditioning_scale,
-    # 加入migc相关的形参
-    bboxes=bboxes,
-    MIGCsteps=25,
-    NaiveFuserSteps=50,
-    aug_phase_with_and=False,
-    negative_prompt=negative_prompt,
-    sa_preserve=True,  # sa_preserve和use_sa_preserve开启consistent-mig算法
-    # use_sa_preserve=True,
-    height=h,  # 这里的h w是否应该为16或者32的倍数？仅是8的倍数是不够的
-    width=w   # 和预想的一样，仅为16的倍数也不够。要为32的倍数，且除以64的余数均同时为0或32才行=>不对，最好全为64的倍数
-).images[0]
-
-image.save('before.png')
-
 prompt_final = [['masterpiece, best quality, brown colored hat, black colored glasses, gray colored scarf, yellow colored medal',
                  'brown colored hat', 'black colored glasses', 'gray colored scarf', 'yellow colored medal'
                  ]]
 bboxes = [[box_xyxy1, box_xyxy2, box_xyxy3, box_xyxy4]]  # 优化了代码，使其不再需要手动计算bboxes，更加智能！
-
+negative_prompt = 'worst quality, low quality, bad anatomy, watermark, text, blurry'
 
 image = pipe(
     prompt_final,
@@ -191,8 +164,8 @@ image = pipe(
     NaiveFuserSteps=50,
     aug_phase_with_and=False,
     negative_prompt=negative_prompt,
-    sa_preserve=True,  # sa_preserve和use_sa_preserve开启consistent-mig算法
-    use_sa_preserve=True,
+    # sa_preserve=True,  # sa_preserve和use_sa_preserve开启consistent-mig算法
+    # use_sa_preserve=True,
     height=h,  # 这里的h w是否应该为16或者32的倍数？仅是8的倍数是不够的
     width=w   # 和预想的一样，仅为16的倍数也不够。要为32的倍数，且除以64的余数均同时为0或32才行=>不对，最好全为64的倍数
 ).images[0]
