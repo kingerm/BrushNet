@@ -898,6 +898,7 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         # 加入migc相关形参
         bboxes: List[List[List[float]]] = None,
+        masks=None,
         MIGCsteps=25,
         NaiveFuserSteps=-1,
         ca_scale=None,
@@ -1162,6 +1163,7 @@ class StableDiffusionBrushNetPipeline(  #这里没有像migc一样只继承了St
                 # predict the noise residual
                 cross_attention_kwargs = {'prompt_nums': prompt_nums,
                                           'bboxes': bboxes,
+                                          'masks': masks,
                                           'ith': i,
                                           'embeds_pooler': embeds_pooler,
                                           'timestep': t,

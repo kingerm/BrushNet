@@ -7,15 +7,33 @@ import cv2
 import numpy as np
 from PIL import Image
 # 下面import migc相关代码
-from migc.migc_utils import seed_everything
-from migc.migc_pipeline import StableDiffusionMIGCPipeline, MIGCProcessor, AttentionStore
-from migc.migc_utils import load_migc
+from migc_plus.migc_utils import seed_everything
+from migc_plus.migc_pipeline import StableDiffusionMIGCPipeline, MIGCProcessor, AttentionStore
+from migc_plus.migc_utils import load_migc
 from torchvision.ops import masks_to_boxes
 import math
 # 下面是zone相关代码
 import argparse
 from mask_utils import *
 from PIL import ImageEnhance
+
+def get_info_from_image(path, height, width):
+    mask = Image.open(path)
+    mask = np.array(mask)
+    mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_CUBIC)  # 对输入的mask进行resize
+    assert mask.shape[0] == height and mask.shape[1] == width, "The mask should have the same size as the generated image!"
+    mask = mask // 255
+    if len(mask.shape) == 3:
+        mask = mask[: ,: ,0]
+    bbox = [1.0, 1.0, 0.0, 0.0]
+    for i in range(mask.shape[0]):
+        for j in range(mask.shape[1]):
+            if mask[i, j] == 1:
+                bbox[0] = min(bbox[0], j / width)
+                bbox[1] = min(bbox[1], i / height)
+                bbox[2] = max(bbox[2], j / width)
+                bbox[3] = max(bbox[3], i / height)
+    return bbox, mask
 
 def read_mask(mask_path, kernel, iterations):
     name = mask_path[4: -4]
@@ -141,13 +159,15 @@ pipe = StableDiffusionBrushNetPipeline.from_pretrained(
     base_model_path, brushnet=brushnet, torch_dtype=torch.float16, low_cpu_mem_usage=False
 )
 
-migc_ckpt_path = 'pretrained_weights/MIGC_SD14.ckpt'
+migc_ckpt_path = 'pretrained_weights/MIGC_plus_SD14.ckpt'
 assert os.path.isfile(migc_ckpt_path), "Please download the ckpt of migc and put it in the pretrained_weighrs/ folder!"
 # pipe2 = StableDiffusionMIGCPipeline.from_pretrained(base_model_path)  # 都用sd1.5的权重 # 先确保两者的unet相同，才好将migc加进来
 # 这里即使两者都用sd1.5进行from_pretrained，pipe.unet依旧不一样，令人困惑
 
 pipe.attention_store = AttentionStore()  # migc部分
-load_migc(pipe.unet, pipe.attention_store, migc_ckpt_path, attn_processor=MIGCProcessor)  # 这里处理了unet，使得需要额外参数作为输入
+from migc_plus.migc_utils import load_migc_plus
+load_migc_plus(pipe.unet, pipe.attention_store,
+            migc_ckpt_path, attn_processor=MIGCProcessor)  # 这里处理了unet，使得需要额外参数作为输入
 pipe = pipe.to("cuda")
 # speed up diffusion process with faster scheduler and memory optimization
 # pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
@@ -159,11 +179,11 @@ pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config)
 # memory optimization.
 pipe.enable_model_cpu_offload()
 
-image_path="src/renxiang4.jpg"
+image_path="src/renlian.jpg"
 init_image = cv2.imread(image_path)[:,:,::-1]
 # mask_image = 1.*(cv2.imread(mask_path).sum(-1)>255)[:,:,np.newaxis]
-mask_path1 = 'src/renxiang4_hat.jpg'
-mask_path2 = 'src/renxiang4_mask_very_coarse.jpg'
+mask_path1 = 'src/renlian_maozi_seg.jpg'
+mask_path2 = 'src/renlian_glasses.jpg'
 mask_path3 = 'src/renlian_scarf.jpg'
 mask_path4 = 'src/renlian_medal.jpg'
 # mask_path3 = 'src/renlian3_necklace.jpg'
@@ -172,19 +192,19 @@ dilate_kernel = np.ones((3, 3), np.uint8)  # dilate核
 dilate_iterations = 2
 mask_image1, box_xyxy1, name1, d_mask_image1, mask_zone1 = read_mask(mask_path1, dilate_kernel, dilate_iterations)
 mask_image2, box_xyxy2, name2, d_mask_image2, mask_zone2 = read_mask(mask_path2, dilate_kernel, dilate_iterations)
-# mask_image3, box_xyxy3, name3, d_mask_image3, mask_zone3 = read_mask(mask_path3, dilate_kernel, dilate_iterations)
-# mask_image4, box_xyxy4, name4, d_mask_image4, mask_zone4 = read_mask(mask_path4, dilate_kernel, dilate_iterations)
+mask_image3, box_xyxy3, name3, d_mask_image3, mask_zone3 = read_mask(mask_path3, dilate_kernel, dilate_iterations)
+mask_image4, box_xyxy4, name4, d_mask_image4, mask_zone4 = read_mask(mask_path4, dilate_kernel, dilate_iterations)
 # cv2.imwrite('renlian_resize_mask1.png', mask_zone1)
 # cv2.imwrite('renlian_resize_mask2.png', mask_zone2)
 # cv2.imwrite('renlian_resize_mask3.png', mask_zone3)
 # cv2.imwrite('renlian_resize_mask4.png', mask_zone4)
 # 定义膨胀kernel  # 上面的mask_image都是(512, 512, 1)，所以给dilated_mask_image添加一维之后就可以直接相加了
-mask_image_wo_d = mask_image1 + mask_image2# + mask_image3 + mask_image4# + mask_image3 + mask_image4  # 记录没有dilate的mask
-mask_image = d_mask_image1 + d_mask_image2 #+ d_mask_image3 + d_mask_image4# + d_mask_image3 + d_mask_image4
+mask_image_wo_d = mask_image1 + mask_image2 + mask_image3 + mask_image4# + mask_image3 + mask_image4  # 记录没有dilate的mask
+mask_image = mask_image1 + mask_image2 + mask_image3 + mask_image4# + d_mask_image3 + d_mask_image4
 mask_image[mask_image > 1.0] = 1.0  # 若mask有重叠，重叠区域相加会大于1，要把它们置为1
 mask = mask_image  # 这里把mask_image给保存下来，方便后面画图
 mask_wo_d = mask_image_wo_d
-name_t = name1 + name2# + name3 + name4
+name_t = name1 + name2 + name3 + name4
 name = 'output' + name_t + '.png'
 ###获取原图的h w###
 h, w, _ = init_image.shape
@@ -208,10 +228,25 @@ seed_everything(seed)
 
 generator = torch.Generator("cuda").manual_seed(1234)
 # 初始化migc需要的形参  # 需要把brushnet的prompt相关代码全部换成migc的
-prompt_final = [['masterpiece, best quality, red colored hat, black colored mask',
-                 'red colored hat', 'black colored mask'
-                 ]]
-bboxes = [[box_xyxy1, box_xyxy2]]  # 优化了代码，使其不再需要手动计算bboxes，更加智能！
+prompt_final = [['masterpiece, best quality, brown colored hat, black colored glasses, gray colored scarf, yellow colored medal']]
+bboxes = [[]]  # 优化了代码，使其不再需要手动计算bboxes，更加智能！
+masks = [[]]
+bbox, mask = get_info_from_image(mask_path1, h, w)
+bboxes[0].append(bbox)
+masks[0].append(mask)
+prompt_final[0].append('brown colored hat')
+bbox, mask = get_info_from_image(mask_path2, h, w)
+bboxes[0].append(bbox)
+masks[0].append(mask)
+prompt_final[0].append('black colored glasses')
+bbox, mask = get_info_from_image(mask_path3, h, w)
+bboxes[0].append(bbox)
+masks[0].append(mask)
+prompt_final[0].append('gray colored scarf')
+bbox, mask = get_info_from_image(mask_path4, h, w)
+bboxes[0].append(bbox)
+masks[0].append(mask)
+prompt_final[0].append('yellow colored medal')
 ########暂时注释掉，尝试zone的效果如何##########
 # prompt_final = [['masterpiece, best quality, brown colored hat',
 #                  'brown colored hat'
@@ -222,12 +257,13 @@ negative_prompt = 'worst quality, low quality, bad anatomy, watermark, text, blu
 image = pipe(
     prompt_final,
     init_image,
-    mask_image,
+    mask_image,  # 这里的init_image和mask_image是否需要resize再输入？按理来说，应该是需要的。但这就不符合原图的初衷了，反正它们输进来后也会resize的
     num_inference_steps=50,
     generator=generator,
     brushnet_conditioning_scale=brushnet_conditioning_scale,
     # 加入migc相关的形参
     bboxes=bboxes,
+    masks=masks,
     MIGCsteps=25,
     NaiveFuserSteps=50,
     aug_phase_with_and=False,
@@ -244,10 +280,10 @@ img1 = zone_ops(image, resize_init_image, mask_zone1)
 cv2.imwrite('zone_multi_output1.png', img1)
 img2 = zone_ops(image, img1, mask_zone2)
 cv2.imwrite('zone_multi_output2.png', img2)
-# img3 = zone_ops(image, img2, mask_zone3)
-# cv2.imwrite('zone_multi_output3.png', img3)
-# img4 = zone_ops(image, img3, mask_zone4)
-# cv2.imwrite('zone_multi_output4.png', img4)
+img3 = zone_ops(image, img2, mask_zone3)
+cv2.imwrite('zone_multi_output3.png', img3)
+img4 = zone_ops(image, img3, mask_zone4)
+cv2.imwrite('zone_multi_output4.png', img4)
 image.save(name)
 image = pipe.draw_box_desc(image, bboxes[0], prompt_final[0][1:])
 mask_img = pipe.draw_mask(image, mask)
