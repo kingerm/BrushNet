@@ -1,6 +1,6 @@
 from diffusers import StableDiffusionBrushNetPipeline, BrushNetModel, UniPCMultistepScheduler
 # import sys
-# sys.path.append('/home/xkzhu/yhx/BrushNet/')
+# sys.path.append('./BrushNet/')
 # from src import StableDiffusionBrushNetPipeline
 import torch
 import cv2

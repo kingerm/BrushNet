@@ -46,15 +46,15 @@ pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
 # memory optimization.
 pipe.enable_model_cpu_offload()
 
-def resize_image(input_image, resolution):
-    H, W, C = input_image.shape
-    H = float(H)
-    W = float(W)
+def resize_image(input_image, resolution):  # 意外发现了一个看起来不错的resize函数！比我自己写的好
+    H, W, C = input_image.shape     # 好像不一定有我写的好，为什么一定要把短边变成512？这样显得很不自由
+    H = float(H)                    # 这其实还可以，因为实际使用中，用户可能传入一张很大的图片，他们才不管这些
+    W = float(W)                    # 但现在还没到那个时候，我自己写的就差不多了。插值就用CUBIC吧
     k = float(resolution) / min(H, W)
     H *= k
     W *= k
     H = int(np.round(H / 64.0)) * 64
-    W = int(np.round(W / 64.0)) * 64
+    W = int(np.round(W / 64.0)) * 64    # 缩小图像时，INTER_AREA是最好的。放大时，看起来brushnet觉得INTER_LANCZOS4是最好的
     img = cv2.resize(input_image, (W, H), interpolation=cv2.INTER_LANCZOS4 if k > 1 else cv2.INTER_AREA)
     return img
 

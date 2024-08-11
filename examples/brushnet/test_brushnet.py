@@ -102,7 +102,7 @@ def zone_ops(style_image, original_image, mask):
     return new_canvas
 def zone_parse_args():
     parser = argparse.ArgumentParser(description='Process some parameters.')
-    parser.add_argument('--sam_ckpt_path', type=str, default="./ckpts/sam_vit_h_4b8939.pth",
+    parser.add_argument('--sam_ckpt_path', type=str, default="./data/ckpt/sam_vit_h_4b8939.pth",
                         help='The path to SAM checkpoint')
     parser.add_argument('--threshold', type=int, default=20, help='The threshold of edge smoother')
     parser.add_argument('--alpha', type=float, default=0.3,
@@ -172,15 +172,15 @@ dilate_kernel = np.ones((3, 3), np.uint8)  # dilate核
 dilate_iterations = 2
 mask_image1, box_xyxy1, name1, d_mask_image1, mask_zone1 = read_mask(mask_path1, dilate_kernel, dilate_iterations)
 mask_image2, box_xyxy2, name2, d_mask_image2, mask_zone2 = read_mask(mask_path2, dilate_kernel, dilate_iterations)
-# mask_image3, box_xyxy3, name3, d_mask_image3, mask_zone3 = read_mask(mask_path3, dilate_kernel, dilate_iterations)
-# mask_image4, box_xyxy4, name4, d_mask_image4, mask_zone4 = read_mask(mask_path4, dilate_kernel, dilate_iterations)
+mask_image3, box_xyxy3, name3, d_mask_image3, mask_zone3 = read_mask(mask_path3, dilate_kernel, dilate_iterations)
+mask_image4, box_xyxy4, name4, d_mask_image4, mask_zone4 = read_mask(mask_path4, dilate_kernel, dilate_iterations)
 # cv2.imwrite('renlian_resize_mask1.png', mask_zone1)
 # cv2.imwrite('renlian_resize_mask2.png', mask_zone2)
 # cv2.imwrite('renlian_resize_mask3.png', mask_zone3)
 # cv2.imwrite('renlian_resize_mask4.png', mask_zone4)
 # 定义膨胀kernel  # 上面的mask_image都是(512, 512, 1)，所以给dilated_mask_image添加一维之后就可以直接相加了
-mask_image_wo_d = mask_image1 + mask_image2# + mask_image3 + mask_image4# + mask_image3 + mask_image4  # 记录没有dilate的mask
-mask_image = d_mask_image1 + d_mask_image2 #+ d_mask_image3 + d_mask_image4# + d_mask_image3 + d_mask_image4
+mask_image_wo_d = mask_image1 + mask_image2# + mask_image3 + mask_image4  # 记录没有dilate的mask
+mask_image = d_mask_image1 + d_mask_image2 #+ d_mask_image3 + d_mask_image4
 mask_image[mask_image > 1.0] = 1.0  # 若mask有重叠，重叠区域相加会大于1，要把它们置为1
 mask = mask_image  # 这里把mask_image给保存下来，方便后面画图
 mask_wo_d = mask_image_wo_d
@@ -201,8 +201,8 @@ init_image = init_image * (1-mask_image)
 
 init_image = Image.fromarray(init_image.astype(np.uint8)).convert("RGB")
 mask_image = Image.fromarray(mask_image.astype(np.uint8).repeat(3,-1)*255).convert("RGB")  # 最右边一维重复三遍，转黑白图再转RGB
-# init_image.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/init_image_T.png', quality=100)
-# mask_image.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/mask_renlian_seg.png', quality=100)
+# init_image.save('./BrushNet/examples/brushnet/init_image_T.png', quality=100)
+# mask_image.save('./BrushNet/examples/brushnet/mask_renlian_seg.png', quality=100)
 seed = 1234
 seed_everything(seed)
 

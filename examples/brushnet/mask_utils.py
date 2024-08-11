@@ -158,9 +158,12 @@ def filter_small_regions(mask, region_thres=64):
     return mask
 
 
-def get_finemask_everything(rough_mask, style_image, predictor):
+def get_finemask_everything(rough_mask, style_image, predictor, mask_output=None):
     if isinstance(style_image, Image.Image):
-        style_image = np.array(style_image)
+        style_image = cv2.cvtColor(np.array(style_image), cv2.COLOR_BGR2RGB)
+    # style_image = (style_image * (rough_mask / rough_mask.max())).astype(np.uint8)  # 确保分割是在mask区域里面
+    if mask_output is not None:
+        rough_mask = mask_output
     mask_generator = SamAutomaticMaskGenerator(predictor)
     print('start generating masks...')
     t1 = time()
@@ -178,21 +181,23 @@ def get_finemask_everything(rough_mask, style_image, predictor):
 
 
 def find_most_overlapping_segmentation(mask, segmentations):
+    mask_zeros = np.zeros_like(mask)
+    # mask_init = mask
     if len(segmentations) == 0:
         return None
     if len(mask.shape) == 3:
         mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
-    if mask.max() > 1:
-        mask = (mask / mask.max()).astype(np.uint8)
+    # if mask.max() > 1:
+    #     mask = (mask / mask.max()).astype(np.uint8)
 
     max_intersection_area = 0
     max_iou = 0
     seg_ratio = 0
     best_segmentation = None
     candidate_segs = []
-    for object_info in segmentations:
+    for object_info in segmentations:  # segmentation就是sam分割出来的各级特征
         segmentation = object_info['segmentation']
-        intersection = np.logical_and(mask, segmentation)
+        intersection = np.logical_and(mask, segmentation)  # intersection是mask与各级特征的交集
         intersection_area = np.sum(intersection)
         union = np.logical_or(mask, segmentation)
         union_area = np.sum(union)
@@ -202,7 +207,13 @@ def find_most_overlapping_segmentation(mask, segmentations):
             seg_ratio = intersection_area / np.sum(segmentation.astype(np.uint8))
             best_segmentation = segmentation
 
+    # 如果max_iou和seg_ratio非常接近，说明交集就是分割区域，即mask在segmentation的里面
+    # IoU很低，但seg_ratio较高时，需要满足以下条件：seg的面积较小，两者重合度较低
     print(f'Best Segmentation IOU: {max_iou:.2f}, seg_ratio:{seg_ratio:.2f}')
+    # if abs(max_iou - seg_ratio) < 0.05 and seg_ratio < 0.7:  # 如果原图中扣不出与mask相近的图片，直接取消扣图，传回一个全0的mask，抵消扣图带来的负面影响
+    #     best_segmentation = mask_init  # 防止乱割
+    if seg_ratio < 0.6:
+        best_segmentation = mask_zeros
     best_segmentation = best_segmentation.astype(np.uint8) * 255
     return best_segmentation
 

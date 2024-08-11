@@ -120,7 +120,7 @@ def zone_ops(style_image, original_image, mask):
     return new_canvas
 def zone_parse_args():
     parser = argparse.ArgumentParser(description='Process some parameters.')
-    parser.add_argument('--sam_ckpt_path', type=str, default="./ckpts/sam_vit_h_4b8939.pth",
+    parser.add_argument('--sam_ckpt_path', type=str, default="./data/ckpt/sam_vit_h_4b8939.pth",
                         help='The path to SAM checkpoint')
     parser.add_argument('--threshold', type=int, default=20, help='The threshold of edge smoother')
     parser.add_argument('--alpha', type=float, default=0.3,
@@ -221,8 +221,8 @@ init_image = init_image * (1-mask_image)
 
 init_image = Image.fromarray(init_image.astype(np.uint8)).convert("RGB")
 mask_image = Image.fromarray(mask_image.astype(np.uint8).repeat(3,-1)*255).convert("RGB")  # 最右边一维重复三遍，转黑白图再转RGB
-# init_image.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/init_image_T.png', quality=100)
-# mask_image.save('/home/xkzhu/yhx/BrushNet/examples/brushnet/mask_renlian_seg.png', quality=100)
+# init_image.save('./BrushNet/examples/brushnet/init_image_T.png', quality=100)
+# mask_image.save('./BrushNet/examples/brushnet/mask_renlian_seg.png', quality=100)
 seed = 1234
 seed_everything(seed)
 
